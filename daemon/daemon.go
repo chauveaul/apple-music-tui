@@ -11,6 +11,7 @@ import (
 type Daemon struct{}
 
 type Track struct {
+	id            string
 	trackName     string
 	trackArtist   string
 	trackAlbum    string
@@ -116,16 +117,17 @@ func (d *Daemon) GetShuffle() (bool, error) {
 }
 
 func (d *Daemon) GetCurrentTrack() (Track, error) {
-	script := `tell application "Music" to get name of current track & "||" & artist of current track & "||" & album of current track & "||" & duration of current track as string`
+	script := `tell application "Music" to get database ID of current track & "||" & name of current track & "||" & artist of current track & "||" & album of current track & "||" & duration of current track as string`
 	out, err := get_script_output(script)
 	if err != nil {
 		return Track{}, err
 	}
 	parts := strings.Split(strings.TrimSpace(string(out)), "||")
-	if len(parts) < 4 {
+	if len(parts) < 5 {
 		return Track{}, errors.New("Invalid output from get_current_track()")
 	}
-	return Track{trackName: parts[0], trackArtist: parts[1], trackAlbum: parts[2], trackDuration: parts[3]}, nil
+	//TODO: Add structs for Album and Artist with their apple music api definitions
+	return Track{id: parts[0], trackName: parts[1], trackArtist: parts[2], trackAlbum: parts[3], trackDuration: parts[4]}, nil
 }
 
 func (d *Daemon) PlayPlaylist(playlist Playlist) error {
@@ -143,59 +145,53 @@ func (d *Daemon) RemoveSongFromPlaylist(song Track, playlist Playlist) error {
 	return run_script(script)
 }
 
-//TODO: Change this for apple music api
-//func (d *Daemon) GetPlaylist(playlistName string) (Playlist, error) {
-//	script := fmt.Sprintf(`tell application "Music" to get name of tracks of playlist "%s"`, playlistName)
-//	out, err := get_script_output(script)
-//	if err != nil {
-//		return Playlist{}, err
-//	}
-//	names := strings.Split(strings.TrimSpace(string(out)), ", ")
-//	tracks := make([]Track, 0, len(names))
-//	fmt.Println(names)
-//	for _, name := range names {
-//		script = fmt.Sprintf(`
-//			tell application "Music" to set t to (first track of playlist "%s" whose name is "%s")
-//				set trackName to name of t
-//				set trackArtist to artist of t
-//				set trackAlbum to album of t
-//				set trackDuration to duration of t as string
-//				return trackName & "||" & trackArtist & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration
-//			`, playlistName, name)
-//		out, err := get_script_output(script)
-//		if err != nil {
-//			continue
-//		}
-//		parts := strings.Split(strings.TrimSpace(string(out)), "||")
-//		if len(parts) == 4 {
-//			tracks = append(tracks, Track{
-//				trackName:     parts[0],
-//				trackArtist:   parts[1],
-//				trackAlbum:    parts[2],
-//				trackDuration: parts[3],
-//			})
-//		}
-//	}
-//	return Playlist{name: playlistName, tracks: tracks}, nil
-//}
-//
-//func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
-//	script := `tell application "Music" to get name of playlists`
-//	out, err := get_script_output(script)
-//	if err != nil {
-//		return []Playlist{}, err
-//	}
-//	names := strings.Split(strings.TrimSpace(string(out)), ", ")
-//	playlists := make([]Playlist, 0, len(names))
-//	for _, name := range names {
-//		pl, err := d.GetPlaylist(name)
-//		if err != nil {
-//			continue
-//		}
-//		playlists = append(playlists, pl)
-//	}
-//	return playlists, nil
-//}
+func (d *Daemon) GetPlaylist(playlistName string) (Playlist, error) {
+	script := fmt.Sprintf(`tell application "Music" to get name of tracks of playlist "%s"`, playlistName)
+	out, err := get_script_output(script)
+	if err != nil {
+		return Playlist{}, err
+	}
+	names := strings.Split(strings.TrimSpace(string(out)), ", ")
+	tracks := make([]Track, 0, len(names))
+	for _, name := range names {
+		script = fmt.Sprintf(`tell application "Music"
+	set t to (first track of playlist "%s" whose name is "%s")
+	set trackName to name of t
+	set trackArtist to artist of t
+	set trackAlbum to album of t
+	set trackDuration to duration of t as string
+	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration
+end tell`, playlistName, name)
+		out, err := get_script_output(script)
+		if err != nil {
+			continue
+		}
+		parts := strings.Split(strings.TrimSpace(string(out)), "||")
+		if len(parts) == 4 {
+			tracks = append(tracks, Track{
+				trackName:     parts[0],
+				trackArtist:   parts[1],
+				trackAlbum:    parts[2],
+				trackDuration: parts[3],
+			})
+		}
+	}
+	return Playlist{name: playlistName, tracks: tracks}, nil
+}
+
+func (d *Daemon) GetAllPlaylistsNames() ([]Playlist, error) {
+	script := `tell application "Music" to get name of playlists`
+	out, err := get_script_output(script)
+	if err != nil {
+		return []Playlist{}, err
+	}
+	names := strings.Split(strings.TrimSpace(string(out)), ", ")
+	playlists := make([]Playlist, 0, len(names))
+	for _, name := range names {
+		playlists = append(playlists, Playlist{name: name, tracks: []Track{}})
+	}
+	return playlists, nil
+}
 
 //TODO: are those even possible?
 //func (d *Daemon) get_queue_tracks() ([]Track, error) {}

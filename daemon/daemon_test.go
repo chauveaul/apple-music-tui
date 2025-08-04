@@ -612,3 +612,47 @@ func TestGetScriptOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestGetPlaylist(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    Playlist
+		wantErr bool
+	}{
+		{
+			name:    "existing playlist",
+			input:   "Straight good music",
+			want:    Playlist{name: "Straight good music", tracks: []Track{{trackName: "After Dark", trackArtist: "Mr.Kitty", trackAlbum: "Time", trackDuration: "259.147003173828"}}},
+			wantErr: false,
+		},
+		{
+			name:    "non-existent playlist",
+			input:   "doesnotexist",
+			want:    Playlist{},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{}
+			got, err := d.GetPlaylist(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetPlaylist() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GetPlaylist() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetAllPlaylists(t *testing.T) {
+	d := &Daemon{}
+	got, err := d.GetAllPlaylistsNames()
+	if err != nil {
+		t.Errorf("GetPlaylist() error = %v, got %v", err, got)
+	}
+}
