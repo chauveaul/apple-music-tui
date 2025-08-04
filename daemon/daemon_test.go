@@ -649,9 +649,17 @@ func TestGetPlaylist(t *testing.T) {
 	}
 }
 
+func TestGetAllPlaylistNames(t *testing.T) {
+	d := &Daemon{}
+	got, err := d.GetAllPlaylistNames()
+	if err != nil {
+		t.Errorf("GetAllPlaylistNames() = %v, got %v", err, got)
+	}
+}
+
 func TestGetAllPlaylists(t *testing.T) {
 	d := &Daemon{}
-	got, err := d.GetAllPlaylistsNames()
+	got, err := d.GetAllPlaylists()
 	if err != nil {
 		t.Errorf("GetPlaylist() error = %v, got %v", err, got)
 	}

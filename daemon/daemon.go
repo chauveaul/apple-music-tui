@@ -179,17 +179,30 @@ end tell`, playlistName, name)
 	return Playlist{name: playlistName, tracks: tracks}, nil
 }
 
-func (d *Daemon) GetAllPlaylistsNames() ([]Playlist, error) {
+func (d *Daemon) GetAllPlaylistNames() ([]string, error) {
 	script := `tell application "Music" to get name of playlists`
 	out, err := get_script_output(script)
 	if err != nil {
+		return []string{}, err
+	}
+	return strings.Split(strings.TrimSpace(string(out)), ", "), nil
+}
+
+func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
+	names, err := d.GetAllPlaylistNames()
+	if err != nil {
 		return []Playlist{}, err
 	}
-	names := strings.Split(strings.TrimSpace(string(out)), ", ")
 	playlists := make([]Playlist, 0, len(names))
-	for _, name := range names {
-		playlists = append(playlists, Playlist{name: name, tracks: []Track{}})
+	for _, name := range names[2:] {
+		fmt.Println("Playlist name:", name)
+		playlist, err := d.GetPlaylist(name)
+		if err != nil {
+			continue
+		}
+		playlists = append(playlists, playlist)
 	}
+	fmt.Println(playlists)
 	return playlists, nil
 }
 
