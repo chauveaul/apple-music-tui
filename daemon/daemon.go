@@ -11,16 +11,24 @@ import (
 type Daemon struct{}
 
 type Track struct {
-	id            string
-	trackName     string
-	trackArtist   string
-	trackAlbum    string
-	trackDuration string
+	Id       string
+	Name     string
+	Artist   string
+	Album    string
+	Duration string
 }
 
 type Playlist struct {
-	name   string
-	tracks []Track
+	Name   string
+	Tracks []Track
+}
+
+type QueueInfo struct {
+	QueueName       string
+	Tracks          []Track
+	CurrentTrack    *Track
+	CurrentPosition int // Position of currently playing track (1-based)
+	TotalTracks     int
 }
 
 func run_script(script string) error {
@@ -29,6 +37,63 @@ func run_script(script string) error {
 
 func get_script_output(script string) ([]byte, error) {
 	return exec.Command("osascript", "-e", script).Output()
+}
+
+func parse_queue_output(out []byte) (*QueueInfo, error) {
+	parts := strings.Split(string(out), "|")
+	if len(parts) < 7 {
+		return nil, fmt.Errorf("Invalid output format")
+	}
+
+	queueName := parts[0]
+	totalTracks, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid track count %w", err)
+	}
+
+	currentPosition, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid current position %w", err)
+	}
+
+	var currentTrack *Track
+	if parts[3] != "" {
+		duration := parts[6]
+		currentTrack = &Track{
+			Name:     parts[3],
+			Artist:   parts[4],
+			Album:    parts[5],
+			Duration: duration,
+		}
+	}
+
+	var tracks []Track
+	if len(parts) > 7 && parts[7] != "" {
+		trackStrings := strings.Split(parts[7], "||")
+		for _, trackStr := range trackStrings {
+			trackParts := strings.Split(trackStr, "~")
+			if len(trackParts) != 5 {
+				continue
+			}
+
+			duration := trackParts[3]
+			track := Track{
+				Name:     trackParts[0],
+				Artist:   trackParts[1],
+				Album:    trackParts[2],
+				Duration: duration,
+			}
+			tracks = append(tracks, track)
+		}
+	}
+
+	return &QueueInfo{
+		QueueName:       queueName,
+		Tracks:          tracks,
+		CurrentTrack:    currentTrack,
+		CurrentPosition: currentPosition,
+		TotalTracks:     totalTracks,
+	}, nil
 }
 
 func (d *Daemon) Play() error {
@@ -126,22 +191,21 @@ func (d *Daemon) GetCurrentTrack() (Track, error) {
 	if len(parts) < 5 {
 		return Track{}, errors.New("Invalid output from get_current_track()")
 	}
-	//TODO: Add structs for Album and Artist with their apple music api definitions
-	return Track{id: parts[0], trackName: parts[1], trackArtist: parts[2], trackAlbum: parts[3], trackDuration: parts[4]}, nil
+	return Track{Id: parts[0], Name: parts[1], Artist: parts[2], Album: parts[3], Duration: parts[4]}, nil
 }
 
 func (d *Daemon) PlayPlaylist(playlist Playlist) error {
-	script := fmt.Sprintf(`tell application "Music" to play playlist "%s"`, playlist.name)
+	script := fmt.Sprintf(`tell application "Music" to play playlist "%s"`, playlist.Name)
 	return run_script(script)
 }
 
 func (d *Daemon) AddSongToPlaylist(song Track, playlist Playlist) error {
-	script := fmt.Sprintf(`tell application "Music" to duplicate (first track whose name is "%s") to playlist "%s"`, song.trackName, playlist.name)
+	script := fmt.Sprintf(`tell application "Music" to duplicate (first track whose name is "%s") to playlist "%s"`, song.Name, playlist.Name)
 	return run_script(script)
 }
 
 func (d *Daemon) RemoveSongFromPlaylist(song Track, playlist Playlist) error {
-	script := fmt.Sprintf(`tell application "Music" to delete (first track whose name is "%s") of playlist "%s"`, song.trackName, playlist.name)
+	script := fmt.Sprintf(`tell application "Music" to delete (first track whose name is "%s") of playlist "%s"`, song.Name, playlist.Name)
 	return run_script(script)
 }
 
@@ -169,14 +233,14 @@ end tell`, playlistName, name)
 		parts := strings.Split(strings.TrimSpace(string(out)), "||")
 		if len(parts) == 4 {
 			tracks = append(tracks, Track{
-				trackName:     parts[0],
-				trackArtist:   parts[1],
-				trackAlbum:    parts[2],
-				trackDuration: parts[3],
+				Name:     parts[0],
+				Artist:   parts[1],
+				Album:    parts[2],
+				Duration: parts[3],
 			})
 		}
 	}
-	return Playlist{name: playlistName, tracks: tracks}, nil
+	return Playlist{Name: playlistName, Tracks: tracks}, nil
 }
 
 func (d *Daemon) GetAllPlaylistNames() ([]string, error) {
@@ -189,6 +253,7 @@ func (d *Daemon) GetAllPlaylistNames() ([]string, error) {
 }
 
 func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
+	//TODO: Cache these in local storage and on run, check if there are changes by looking at the length of names
 	names, err := d.GetAllPlaylistNames()
 	if err != nil {
 		return []Playlist{}, err
@@ -202,11 +267,132 @@ func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
 		}
 		playlists = append(playlists, playlist)
 	}
-	fmt.Println(playlists)
 	return playlists, nil
 }
 
-//TODO: are those even possible?
-//func (d *Daemon) get_queue_tracks() ([]Track, error) {}
-//func (d *Daemon) add_song_to_queue(song Track) {}
-//func (d *Daemon) remove_song_from_queue(song Track) {}
+func (d *Daemon) GetQueueInfo() (*QueueInfo, error) {
+	script := `
+tell application "Music"
+	if it is not running then
+		return "Music app is not running"
+	end if
+	
+	try
+		set currentQueue to current playlist
+		set queueName to name of currentQueue
+		set trackCount to count of tracks of currentQueue
+		
+		-- Get current track info
+		set currentTrackName to ""
+		set currentTrackArtist to ""
+		set currentTrackAlbum to ""
+		set currentTrackDuration to 0
+		set currentPosition to 0
+		
+		try
+			set currentTrack to current track
+			set currentTrackName to name of currentTrack
+			set currentTrackArtist to artist of currentTrack
+			set currentTrackAlbum to album of currentTrack
+			set currentTrackDuration to duration of currentTrack
+			
+			-- Find position of current track in queue
+			repeat with i from 1 to trackCount
+				if track i of currentQueue is currentTrack then
+					set currentPosition to i
+					exit repeat
+				end if
+			end repeat
+		end try
+		
+		-- Build result string
+		set outputResult to queueName & "|" & trackCount & "|" & currentPosition & "|"
+		set outputResult to outputResult & currentTrackName & "|" & currentTrackArtist & "|" & currentTrackAlbum & "|" & currentTrackDuration & "|"
+		
+		-- Get all tracks in queue
+		repeat with i from 1 to trackCount
+			set queueTrack to track i of currentQueue
+			set trackName to name of queueTrack
+			set trackArtist to artist of queueTrack
+			set trackAlbum to album of queueTrack
+			set trackDuration to duration of queueTrack
+			
+			set outputResult to outputResult & trackName & "~" & trackArtist & "~" & trackAlbum & "~" & trackDuration & "~" & i
+			if i < trackCount then set outputResult to outputResult & "||"
+		end repeat
+		
+		return outputResult
+		
+	on error errMsg
+		return "Error: " & errMsg
+	end try
+end tell`
+
+	out, err := get_script_output(script)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(string(out), "Error:") || strings.HasPrefix(string(out), "Music app is not running") {
+		return nil, fmt.Errorf("Encountered an error in apple script %s", string(out))
+	}
+	return parse_queue_output(out)
+}
+
+func (d *Daemon) AddToQueue(track Track) error {
+	// Build search criteria - we'll search by name and artist primarily
+	searchQuery := track.Name
+	if track.Artist != "" {
+		searchQuery += " " + track.Artist
+	}
+
+	// Escape quotes in the search query and track details
+	searchQuery = strings.ReplaceAll(searchQuery, `"`, `\"`)
+	trackName := strings.ReplaceAll(track.Name, `"`, `\"`)
+	trackArtist := strings.ReplaceAll(track.Artist, `"`, `\"`)
+
+	script := fmt.Sprintf(`
+	tell application "Music"
+		if it is not running then
+			error "Music app is not running"
+		end if
+		
+		try
+			-- Search your local library
+			set localTracks to (tracks whose name is "%s" and artist is "%s")
+			
+			if (count of localTracks) = 0 then
+				error "Track not found in your library"
+			end if
+			
+			set targetTrack to item 1 of localTracks
+			
+			-- Check if playlist exists, create if it doesn't
+			try
+				set targetPlaylist to user playlist "amtui Queue"
+			on error
+				-- Create the playlist
+				set targetPlaylist to (make new user playlist with properties {name:"amtui Queue"})
+			end try
+			
+			-- Add track using duplicate instead of add
+			duplicate targetTrack to targetPlaylist
+			
+			return "Added: " & (name of targetTrack) & " by " & (artist of targetTrack) & " to amtui Queue"
+			
+		on error errMsg
+			error "Failed to add track: " & errMsg
+		end try
+	end tell
+	`, trackName, trackArtist)
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("failed to add track to queue: %w", err)
+	}
+
+	if strings.HasPrefix(string(out), "Failed to add track:") {
+		return fmt.Errorf("Failed to add to queue with err %s", string(out))
+	}
+
+	fmt.Printf("✅ %s\n", out)
+	return nil
+}

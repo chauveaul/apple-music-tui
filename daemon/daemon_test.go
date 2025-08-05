@@ -664,3 +664,11 @@ func TestGetAllPlaylists(t *testing.T) {
 		t.Errorf("GetPlaylist() error = %v, got %v", err, got)
 	}
 }
+
+func TestDaemon_GetQueueInfo(t *testing.T) {
+	d := &Daemon{}
+	got, err := d.GetQueueInfo()
+	if err != nil {
+		t.Errorf("GetQueueInfo() error = %v, got %v", err, got)
+	}
+}
