@@ -6,6 +6,7 @@ import (
 
 	"main/daemon"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
@@ -16,7 +17,7 @@ import (
 type focusArea int
 
 const (
-	focusLibrary focusArea = iota
+	focusSearch focusArea = iota
 	focusPlaylists
 	focusMain
 )
@@ -24,16 +25,31 @@ const (
 // Component models for bubbleboxer
 type searchHelpModel struct {
 	width, height int
+	textInput   textinput.Model
+	searching   bool
 }
 
-func (m searchHelpModel) Init() tea.Cmd { return nil }
+func (m searchHelpModel) Init() tea.Cmd {
+	ti := textinput.New()
+	ti.Placeholder = "Search..."
+	ti.Focus()
+	ti.CharLimit = 156
+	ti.Width = 20
+	return nil
+}
 func (m searchHelpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 	}
-	return m, nil
+
+	if m.searching {
+		m.textInput, cmd = m.textInput.Update(msg)
+	}
+
+	return m, cmd
 }
 func (m searchHelpModel) View() string {
 	var content strings.Builder
@@ -41,91 +57,17 @@ func (m searchHelpModel) View() string {
 	// Bold header with title
 	content.WriteString(titleStyle.Render("Search"))
 	content.WriteString("\n\n")
-	content.WriteString("[Search box]")
+	if m.searching {
+		content.WriteString(m.textInput.View())
+	} else {
+		content.WriteString("[Search box]")
+	}
 	content.WriteString("\n")
-	content.WriteString("Help: Tab/Ctrl+W+hjkl")
+	content.WriteString("Help: / search • Esc cancel")
 
 	return content.String()
 }
 
-type libraryModel struct {
-	width, height int
-	selectedItem  int
-	focused       bool
-	activeItem    int
-	scrollOffset  int
-}
-
-func (m libraryModel) Init() tea.Cmd { return nil }
-func (m libraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-	}
-	return m, nil
-}
-func (m libraryModel) View() string {
-	libraryItems := []string{"Made For You", "Recently Played", "Liked Songs", "Albums", "Artists", "Podcasts"}
-
-	var content strings.Builder
-
-	// Bold header with title
-	content.WriteString(titleStyle.Render("Library"))
-	content.WriteString("\n\n")
-
-	// Calculate visible items based on height (height - 2 for header)
-	visibleItems := m.height - 2
-	showScrollbar := len(libraryItems) > visibleItems
-
-	if showScrollbar {
-		visibleItems-- // Make space for scrollbar
-	}
-	if visibleItems < 0 {
-		visibleItems = 0
-	}
-
-	// Calculate scroll bounds
-	startIdx := m.scrollOffset
-	endIdx := startIdx + visibleItems
-	if endIdx > len(libraryItems) {
-		endIdx = len(libraryItems)
-	}
-
-	// Render visible items
-	for i := startIdx; i < endIdx; i++ {
-		item := libraryItems[i]
-			var line string
-			if i == m.activeItem {
-				line = activeItemStyle.Render("> " + item)
-			} else if m.focused && i == m.selectedItem {
-				line = unfocusedSelectedItemStyle.Render("> " + item)
-			} else {
-				line = "  " + item
-			}
-
-			// Truncate line if too long
-			if runewidth.StringWidth(line) > m.width {
-				line = runewidth.Truncate(line, m.width-3, "...")
-			}
-			content.WriteString(line)
-
-		if i < endIdx-1 {
-			content.WriteString("\n")
-		}
-	}
-
-	// Add scroll indicator if there are more items
-	if showScrollbar {
-		if endIdx > startIdx {
-			content.WriteString("\n")
-		}
-		scrollInfo := fmt.Sprintf("[%d/%d]", m.selectedItem+1, len(libraryItems))
-		content.WriteString(scrollInfo)
-	}
-
-	return content.String()
-}
 
 type playlistsModel struct {
 	width, height int
@@ -319,7 +261,7 @@ func (m instructionsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 func (m instructionsModel) View() string {
 	focusName := map[focusArea]string{
-		focusLibrary:   "Library",
+		focusSearch:    "Search",
 		focusPlaylists: "Playlists",
 		focusMain:      "Main",
 	}
@@ -332,7 +274,6 @@ func (m instructionsModel) View() string {
 type Model struct {
 	boxer                bubbleboxer.Boxer
 	currentFocus         focusArea
-	selectedLibraryItem  int
 	selectedPlaylistItem int
 	ctrlWPressed         bool
 	selectedPlaylist     string
@@ -419,25 +360,29 @@ func NewModel() Model {
 		ModelMap: make(map[string]tea.Model),
 	}
 
+	ti := textinput.New()
+	ti.Placeholder = "Search for playlists..."
+	ti.CharLimit = 156
+	ti.Width = 20
+
 	// Create leaf nodes
-	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4})
-	libraryLeaf, _ := boxer.CreateLeaf("library", libraryModel{width: 30, height: 8, selectedItem: 0, activeItem: -1, focused: true})
-	playlistsLeaf, _ := boxer.CreateLeaf("playlists", playlistsModel{width: 30, height: 12, selectedItem: 0, activeItem: -1, focused: false})
+	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4, textInput: ti})
+	playlistsLeaf, _ := boxer.CreateLeaf("playlists", playlistsModel{width: 30, height: 12, selectedItem: 0, activeItem: -1, focused: true})
 	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false})
-	instructionsLeaf, _ := boxer.CreateLeaf("instructions", instructionsModel{width: 80, currentFocus: focusLibrary})
+	instructionsLeaf, _ := boxer.CreateLeaf("instructions", instructionsModel{width: 80, currentFocus: focusPlaylists})
 
 	// Create the layout tree structure
 	// Sidebar (vertical layout)
 	sidebar := bubbleboxer.Node{
-		Children:        []bubbleboxer.Node{searchHelpLeaf, libraryLeaf, playlistsLeaf},
+		Children:        []bubbleboxer.Node{searchHelpLeaf, playlistsLeaf},
 		VerticalStacked: true,
 		SizeFunc: func(node bubbleboxer.Node, widthOrHeight int) []int {
-			// Fixed heights: search=4, library=8, rest for playlists
-			remaining := widthOrHeight - 4 - 8
+			// Fixed heights: search=4, rest for playlists
+			remaining := widthOrHeight - 4
 			if remaining < 8 {
 				remaining = 8
 			}
-			return []int{4, 8, remaining}
+			return []int{4, remaining}
 		},
 	}
 
@@ -473,8 +418,7 @@ func NewModel() Model {
 
 	return Model{
 		boxer:                boxer,
-		currentFocus:         focusLibrary,
-		selectedLibraryItem:  0,
+		currentFocus:         focusPlaylists,
 		selectedPlaylistItem: 0,
 		ctrlWPressed:         false,
 		selectedPlaylist:     "",
@@ -512,19 +456,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "h":
 				if m.currentFocus == focusMain {
 					m.currentFocus = focusPlaylists
-				} else if m.currentFocus == focusPlaylists {
-					m.currentFocus = focusLibrary
-				}
-			case "j":
-				if m.currentFocus == focusLibrary {
-					m.currentFocus = focusPlaylists
-				}
-			case "k":
-				if m.currentFocus == focusPlaylists {
-					m.currentFocus = focusLibrary
 				}
 			case "l":
-				if m.currentFocus != focusMain {
+				if m.currentFocus == focusPlaylists {
 					m.currentFocus = focusMain
 				}
 			}
@@ -532,16 +466,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.currentFocus == focusSearch {
+			switch msg.String() {
+			case "enter":
+				// TODO: Implement search filtering
+				m.currentFocus = focusPlaylists
+				m.updateFocus()
+				return m, nil
+			case "esc":
+				// Clear search and return to playlists
+				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
+					sh := model.(searchHelpModel)
+					sh.textInput.SetValue("")
+					return sh, nil
+				})
+				m.currentFocus = focusPlaylists
+				m.updateFocus()
+				return m, nil
+			default:
+				// Forward all other key events to the search input
+				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
+					sh := model.(searchHelpModel)
+					var inputCmd tea.Cmd
+					sh.textInput, inputCmd = sh.textInput.Update(msg)
+					if inputCmd != nil {
+						cmd = inputCmd
+					}
+					return sh, nil
+				})
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+
+		case "/":
+			m.currentFocus = focusSearch
+			m.updateFocus()
+			return m, nil
 
 		case "ctrl+w":
 			m.ctrlWPressed = true
 
 		case "enter":
-			switch m.currentFocus {
-			case focusPlaylists:
+			if m.currentFocus == focusPlaylists {
 				// Get the selected playlist name
 				m.boxer.EditLeaf("playlists", func(model tea.Model) (tea.Model, error) {
 					pl := model.(playlistsModel)
@@ -557,51 +527,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					main.currentPlaylist = m.selectedPlaylist
 					return main, nil
 				})
-				// Un-select the library item
-				m.boxer.EditLeaf("library", func(model tea.Model) (tea.Model, error) {
-					lib := model.(libraryModel)
-					lib.activeItem = -1
-					return lib, nil
-				})
-			case focusLibrary:
-				m.boxer.EditLeaf("library", func(model tea.Model) (tea.Model, error) {
-					lib := model.(libraryModel)
-					lib.activeItem = m.selectedLibraryItem
-					return lib, nil
-				})
-				// Un-select the playlist item
-				m.boxer.EditLeaf("playlists", func(model tea.Model) (tea.Model, error) {
-					pl := model.(playlistsModel)
-					pl.activeItem = -1
-					return pl, nil
-				})
-				// Clear the main content view
-				m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
-					main := model.(mainContentModel)
-					main.currentPlaylist = ""
-					return main, nil
-				})
 			}
 
 		case "tab":
-			switch m.currentFocus {
-			case focusLibrary:
-				m.currentFocus = focusPlaylists
-			case focusPlaylists:
+			if m.currentFocus == focusPlaylists {
 				m.currentFocus = focusMain
-			case focusMain:
-				m.currentFocus = focusLibrary
+			} else {
+				m.currentFocus = focusPlaylists
 			}
 			m.updateFocus()
 
 		case "up", "k":
-			switch m.currentFocus {
-			case focusLibrary:
-				if m.selectedLibraryItem > 0 {
-					m.selectedLibraryItem--
-					m.updateLibrarySelection()
-				}
-			case focusPlaylists:
+			if m.currentFocus == focusPlaylists {
 				if m.selectedPlaylistItem > 0 {
 					m.selectedPlaylistItem--
 					m.updatePlaylistSelection()
@@ -609,14 +546,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			switch m.currentFocus {
-			case focusLibrary:
-				libraryItems := []string{"Made For You", "Recently Played", "Liked Songs", "Albums", "Artists", "Podcasts"}
-				if m.selectedLibraryItem < len(libraryItems)-1 {
-					m.selectedLibraryItem++
-					m.updateLibrarySelection()
-				}
-			case focusPlaylists:
+			if m.currentFocus == focusPlaylists {
 				// Get playlist count from the cached model
 				var playlistCount int
 				m.boxer.EditLeaf("playlists", func(model tea.Model) (tea.Model, error) {
@@ -637,12 +567,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // Helper methods to update focus and selections
 func (m *Model) updateFocus() {
-	// Update library focus
-	m.boxer.EditLeaf("library", func(model tea.Model) (tea.Model, error) {
-		lib := model.(libraryModel)
-		lib.focused = (m.currentFocus == focusLibrary)
-		lib.selectedItem = m.selectedLibraryItem
-		return lib, nil
+	// Update search focus
+	m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
+		sh := model.(searchHelpModel)
+		sh.searching = (m.currentFocus == focusSearch)
+		if sh.searching {
+			sh.textInput.Focus()
+		} else {
+			sh.textInput.Blur()
+		}
+		return sh, nil
 	})
 
 	// Update playlists focus
@@ -668,36 +602,6 @@ func (m *Model) updateFocus() {
 	})
 }
 
-func (m *Model) updateLibrarySelection() {
-	libraryItems := []string{"Made For You", "Recently Played", "Liked Songs", "Albums", "Artists", "Podcasts"}
-
-	m.boxer.EditLeaf("library", func(model tea.Model) (tea.Model, error) {
-		lib := model.(libraryModel)
-		lib.selectedItem = m.selectedLibraryItem
-
-		// Update scroll offset using same logic as View()
-		visibleItems := lib.height - 2
-		showScrollbar := len(libraryItems) > visibleItems
-
-		if showScrollbar {
-			visibleItems-- // Make space for scrollbar
-		}
-		if visibleItems < 0 {
-			visibleItems = 0
-		}
-
-		// If selected item is above visible area, scroll up
-		if m.selectedLibraryItem < lib.scrollOffset {
-			lib.scrollOffset = m.selectedLibraryItem
-		}
-		// If selected item is below visible area, scroll down
-		if m.selectedLibraryItem >= lib.scrollOffset+visibleItems {
-			lib.scrollOffset = m.selectedLibraryItem - visibleItems + 1
-		}
-
-		return lib, nil
-	})
-}
 
 func (m *Model) updatePlaylistSelection() {
 	m.boxer.EditLeaf("playlists", func(model tea.Model) (tea.Model, error) {
