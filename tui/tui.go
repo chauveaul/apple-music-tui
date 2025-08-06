@@ -2,7 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"math/rand"
+	"slices"
 	"strings"
+	"time"
 
 	"main/daemon"
 
@@ -25,8 +28,8 @@ const (
 // Component models for bubbleboxer
 type searchHelpModel struct {
 	width, height int
-	textInput   textinput.Model
-	searching   bool
+	textInput     textinput.Model
+	searching     bool
 }
 
 func (m searchHelpModel) Init() tea.Cmd {
@@ -52,22 +55,56 @@ func (m searchHelpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 func (m searchHelpModel) View() string {
-	var content strings.Builder
-
-	// Bold header with title
-	content.WriteString(titleStyle.Render("Search"))
-	content.WriteString("\n\n")
-	if m.searching {
-		content.WriteString(m.textInput.View())
-	} else {
-		content.WriteString("[Search box]")
+	// Ensure we have valid dimensions
+	if m.height <= 0 || m.width <= 0 {
+		return ""
 	}
-	content.WriteString("\n")
-	content.WriteString("Help: / search • Esc cancel")
+
+	var lines []string
+	lines = append(lines, titleStyle.Render("Search"))
+	lines = append(lines, "")
+	if m.searching {
+		lines = append(lines, m.textInput.View())
+	} else {
+		lines = append(lines, "[Search box]")
+	}
+	lines = append(lines, "Help: / search • Esc cancel")
+
+	// Limit lines to fit within height constraint
+	maxLines := m.height
+	if maxLines > len(lines) {
+		maxLines = len(lines)
+	}
+	if maxLines < 1 {
+		maxLines = 1
+	}
+
+	var content strings.Builder
+	for i := 0; i < maxLines; i++ {
+		var line string
+		if i < len(lines) {
+			line = lines[i]
+		} else {
+			line = ""
+		}
+		
+		// Truncate line if too long
+		if len(line) > m.width {
+			if m.width > 3 {
+				line = line[:m.width-3] + "..."
+			} else if m.width > 0 {
+				line = line[:m.width]
+			}
+		}
+		
+		content.WriteString(line)
+		if i < maxLines-1 {
+			content.WriteString("\n")
+		}
+	}
 
 	return content.String()
 }
-
 
 type playlistsModel struct {
 	width, height int
@@ -87,7 +124,12 @@ type playlistsMsg struct {
 func fetchPlaylists() tea.Msg {
 	d := daemon.Daemon{}
 	playlists, err := d.GetAllPlaylistNames()
-	return playlistsMsg{playlists: playlists, err: err}
+	//Removing the queue that we made because it is not a user playlist
+	if slices.Index(playlists, "amtui Queue") != -1 {
+		playlists = slices.Delete(playlists, slices.Index(playlists, "amtui Queue"), slices.Index(playlists, "amtui Queue")+1)
+	}
+	//Taking the slice playlists[2:] to remove "Library" and "Music"
+	return playlistsMsg{playlists: playlists[2:], err: err}
 }
 
 func (m playlistsModel) Init() tea.Cmd {
@@ -105,23 +147,37 @@ func (m playlistsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m playlistsModel) View() string {
+	// Ensure we have valid dimensions
+	if m.height <= 0 || m.width <= 0 {
+		return ""
+	}
+
 	// Use cached playlists if available, otherwise show error
 	playlistItems := m.playlistItems
 	if m.lastError != nil {
-		return fmt.Sprintf("Error: %v", m.lastError)
+		// Return truncated error message if needed
+		errorMsg := fmt.Sprintf("Error: %v", m.lastError)
+		if len(errorMsg) > m.width {
+			if m.width > 3 {
+				errorMsg = errorMsg[:m.width-3] + "..."
+			} else {
+				errorMsg = errorMsg[:m.width]
+			}
+		}
+		return errorMsg
 	}
 	if len(playlistItems) == 0 {
 		return titleStyle.Render("Playlists") + "\n\nLoading..."
 	}
 
-	var content strings.Builder
+	// Build all lines first
+	var allLines []string
+	allLines = append(allLines, titleStyle.Render("Playlists"))
+	allLines = append(allLines, "")
 
-	// Bold header with title
-	content.WriteString(titleStyle.Render("Playlists"))
-	content.WriteString("\n\n")
-
-	// Calculate how many items can be displayed
-	visibleItems := m.height - 2
+	// Calculate how many items can be displayed (reserve space for header + empty line)
+	headerLines := 2
+	visibleItems := m.height - headerLines
 
 	if len(m.playlistItems) > visibleItems {
 		visibleItems-- // Make space for scrollbar
@@ -137,45 +193,55 @@ func (m playlistsModel) View() string {
 		endIdx = len(playlistItems)
 	}
 
-	// Render visible items
+	// Add visible playlist items
 	for i := startIdx; i < endIdx; i++ {
 		item := playlistItems[i]
-			var line string
-			if i == m.activeItem {
-				line = activeItemStyle.Render("> " + item)
-			} else if m.focused && i == m.selectedItem {
-				line = unfocusedSelectedItemStyle.Render("> " + item)
-			} else {
-				line = "  " + item
-			}
-
-			// Truncate line if too long
-			if runewidth.StringWidth(line) > m.width {
-				line = runewidth.Truncate(line, m.width-3, "...")
-			}
-			content.WriteString(line)
-
-		if i < endIdx-1 {
-			content.WriteString("\n")
+		var line string
+		if i == m.activeItem {
+			line = activeItemStyle.Render("> " + item)
+		} else if m.focused && i == m.selectedItem {
+			line = unfocusedSelectedItemStyle.Render("> " + item)
+		} else {
+			line = "  " + item
 		}
+
+		// Truncate line if too long
+		if runewidth.StringWidth(line) > m.width {
+			line = runewidth.Truncate(line, m.width-3, "...")
+		}
+		allLines = append(allLines, line)
 	}
 
 	// Add scroll indicator if there are more items
-	if len(m.playlistItems) > visibleItems {
-		if endIdx > startIdx {
+	if len(m.playlistItems) > visibleItems && len(allLines) < m.height {
+		scrollInfo := fmt.Sprintf("[%d/%d]", m.selectedItem+1, len(m.playlistItems))
+		allLines = append(allLines, scrollInfo)
+	}
+
+	// Ensure we don't exceed height
+	maxLines := m.height
+	if maxLines > len(allLines) {
+		maxLines = len(allLines)
+	}
+
+	var content strings.Builder
+	for i := 0; i < maxLines; i++ {
+		if i < len(allLines) {
+			content.WriteString(allLines[i])
+		}
+		if i < maxLines-1 {
 			content.WriteString("\n")
 		}
-		scrollInfo := fmt.Sprintf("[%d/%d]", m.selectedItem+1, len(m.playlistItems))
-		content.WriteString(scrollInfo)
 	}
 
 	return content.String()
 }
 
 type mainContentModel struct {
-	width, height int
-	focused       bool
+	width, height   int
+	focused         bool
 	currentPlaylist string
+	cachedAsciiArt  []string // Cache ASCII art to prevent reshuffling
 }
 
 func (m mainContentModel) Init() tea.Cmd { return nil }
@@ -188,57 +254,68 @@ func (m mainContentModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m mainContentModel) View() string {
+	// Ensure we have valid dimensions
+	if m.height <= 0 || m.width <= 0 {
+		return ""
+	}
+
 	var content strings.Builder
+	var allLines []string
 
-	// Bold header with title
-	content.WriteString(titleStyle.Render("Main Content"))
-	content.WriteString("\n\n")
-
-	// If a playlist is selected, show its name. Otherwise, show default content.
+	// If a playlist is selected, show its name. Otherwise, show cached ASCII art.
 	if m.currentPlaylist != "" {
-		content.WriteString(fmt.Sprintf("Selected playlist: %s", m.currentPlaylist))
+		allLines = []string{
+			"Main Content",
+			"",
+			fmt.Sprintf("Selected playlist: %s", m.currentPlaylist),
+		}
 	} else {
-		// Content lines
-		lines := []string{
-			"Please report bugs or missing features to",
-			"https://github.com/Rigellute/spotify-tui",
-			"",
-			"# Changelog",
-			"",
-			"## [0.25.0] - 2021-08-24",
-			"",
-			"### Fixed",
-			"",
-			"- Fixed rate limiting issue [#852]",
-			"",
-			"- Fix double navigation to same route [#826]",
+		// Use cached ASCII art if available, otherwise get a random one
+		asciiLines := m.cachedAsciiArt
+		if len(asciiLines) == 0 {
+			asciiLines = getRandomAsciiArt()
 		}
+		
+		// Build complete content with header
+		allLines = append([]string{"Main Content", ""}, asciiLines...)
+	}
 
-		// Limit lines to fit within height constraint (height - 2 for header)
-		maxLines := m.height - 2
-		if maxLines > len(lines) {
-			maxLines = len(lines)
-		}
-		if maxLines < 1 {
-			maxLines = 1
-		}
+	// Limit total lines to fit within height constraint
+	maxLines := m.height
+	if maxLines > len(allLines) {
+		maxLines = len(allLines)
+	}
+	if maxLines < 1 {
+		maxLines = 1
+	}
 
-		for i := 0; i < maxLines; i++ {
-			var line string
-			if i < len(lines) {
-				line = " " + lines[i] // Add left padding
+	// Render the lines that fit
+	for i := 0; i < maxLines; i++ {
+		var line string
+		if i < len(allLines) {
+			if i == 0 {
+				// Apply title styling to the first line (header)
+				line = " " + titleStyle.Render(allLines[i])
 			} else {
-				line = " " // Empty line with padding
+				line = " " + allLines[i] // Add left padding
 			}
-			// Truncate line if too long
-			if len(line) > m.width {
+		} else {
+			line = " " // Empty line with padding
+		}
+		
+		// Truncate line if too long for the width
+		if len(line) > m.width {
+			if m.width > 3 {
+				line = line[:m.width-3] + "..."
+			} else if m.width > 0 {
 				line = line[:m.width]
 			}
-			padding := m.width - len(line)
-			if padding < 0 {
-				padding = 0
-			}
-			content.WriteString(line + strings.Repeat(" ", padding))
+		}
+		
+		content.WriteString(line)
+		
+		// Add newline except for the last line
+		if i < maxLines-1 {
 			content.WriteString("\n")
 		}
 	}
@@ -270,6 +347,81 @@ func (m instructionsModel) View() string {
 	return fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate", focusName[m.currentFocus])
 }
 
+// getRandomAsciiArt returns a random ASCII art from the available collection
+func getRandomAsciiArt() []string {
+	asciiArts := [][]string{
+		// Original ASCII Art (your provided one)
+		{
+			" (`-')  _ <-. (`-')  (`-')                  _      ",
+			" (OO ).-/    \\(OO )_ ( OO).->       .->    (_)     ",
+			" / ,---.  ,--./  ,-.)/    '._  ,--.(,--.   ,-(`-') ",
+			" | \\ /`.\\\\|   `.'   ||'--...__)|  | |(`-') | ( OO) ",
+			" '-'|_.' ||  |'.'|  |`--.  .--'|  | |(OO ) |  |  ) ",
+			"(|  .-.  ||  |   |  |   |  |   |  | | |  \\(|  |_/  ",
+			" |  | |  ||  |   |  |   |  |   \\  '-'(_ .' |  |'-> ",
+			" `--' `--'`--'   `--'   `--'    `-----'    `--'    ",
+			"",
+			"             Welcome to Apple Music TUI!",
+			"",
+			"               Controls:",
+			"     [TAB] Navigate  [ENTER] Select",
+			"     [↑↓] Move       [/] Search",
+			"               [Q] Quit",
+		},
+		// Music Note ASCII
+		{
+			"                    __        .__ ",
+			"    _____    ______/  |_ __ __|__|",
+			"    \\__  \\  /     \\   __\\  |  \\  |",
+			"     / __ \\|  Y Y  \\  | |  |  /  |",
+			"    (____  /__|_|  /__| |____/|__|",
+			"         \\/      \\/                  ",
+			"",
+			"           APPLE MUSIC TUI",
+			"",
+			"               Controls:",
+			"     [TAB] Navigate  [ENTER] Select",
+			"     [↑↓] Move       [/] Search",
+			"               [Q] Quit",
+		},
+		// Simple Text Art
+		{
+			"                   _                _    ",
+			"  __ _    _ __    | |_    _  _     (_)   ",
+			" / _` |  | '  \\   |  _|  | +| |    | |   ",
+			" \\__,_|  |_|_|_|  _\\__|   \\_,_|   _|_|_  ",
+			"_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"| ",
+			"\"`-0-0-'\"`-0-0-'\"`-0-0-'\"`-0-0-'\"`-0-0-' ",
+			"",
+			"               Controls:",
+			"     [TAB] Navigate  [ENTER] Select",
+			"     [↑↓] Move       [/] Search",
+			"               [Q] Quit",
+		},
+		// Retro Style
+		{
+			"                   __                   ",
+			"                  /\\ \\__          __    ",
+			"   __      ___ ___\\ \\ ,_\\  __  __/\\_\\   ",
+			" /'__`\\  /' __` __`\\ \\ \\/ /\\ \\/\\ \\/\\ \\  ",
+			"/\\ \\L\\.\\_/\\ \\/\\ \\/\\ \\ \\ \\_\\ \\ \\_\\ \\ \\ \\ ",
+			"\\ \\__/.\\_\\ \\_\\ \\_\\ \\_\\ \\__\\\\ \\____/\\ \\_\\",
+			"\\/__/\\/_/\\/_/\\/_/\\/_/\\/__/ \\/___/  \\/_/",
+			"",
+			"               Controls:",
+			"     [TAB] Navigate  [ENTER] Select",
+			"     [↑↓] Move       [/] Search",
+			"               [Q] Quit",
+		},
+	}
+
+	// Seed random number generator with current time
+	rand.Seed(time.Now().UnixNano())
+
+	// Return a random ASCII art
+	return asciiArts[rand.Intn(len(asciiArts))]
+}
+
 // Model represents the application state using bubbleboxer
 type Model struct {
 	boxer                bubbleboxer.Boxer
@@ -277,6 +429,7 @@ type Model struct {
 	selectedPlaylistItem int
 	ctrlWPressed         bool
 	selectedPlaylist     string
+	randomAscii          []string // Store the randomly selected ASCII art
 }
 
 // Styles
@@ -365,10 +518,13 @@ func NewModel() Model {
 	ti.CharLimit = 156
 	ti.Width = 20
 
+	// Generate ASCII art once at startup
+	cachedAscii := getRandomAsciiArt()
+
 	// Create leaf nodes
 	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4, textInput: ti})
 	playlistsLeaf, _ := boxer.CreateLeaf("playlists", playlistsModel{width: 30, height: 12, selectedItem: 0, activeItem: -1, focused: true})
-	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false})
+	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false, cachedAsciiArt: cachedAscii})
 	instructionsLeaf, _ := boxer.CreateLeaf("instructions", instructionsModel{width: 80, currentFocus: focusPlaylists})
 
 	// Create the layout tree structure
@@ -601,7 +757,6 @@ func (m *Model) updateFocus() {
 		return instr, nil
 	})
 }
-
 
 func (m *Model) updatePlaylistSelection() {
 	m.boxer.EditLeaf("playlists", func(model tea.Model) (tea.Model, error) {
