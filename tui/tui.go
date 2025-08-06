@@ -87,7 +87,7 @@ func (m searchHelpModel) View() string {
 		} else {
 			line = ""
 		}
-		
+
 		// Truncate line if too long
 		if len(line) > m.width {
 			if m.width > 3 {
@@ -96,7 +96,7 @@ func (m searchHelpModel) View() string {
 				line = line[:m.width]
 			}
 		}
-		
+
 		content.WriteString(line)
 		if i < maxLines-1 {
 			content.WriteString("\n")
@@ -121,6 +121,12 @@ type playlistsMsg struct {
 	err       error
 }
 
+// New message type for full playlist data with tracks
+type allPlaylistsMsg struct {
+	playlists map[string]daemon.Playlist // Map from playlist name to playlist data
+	err       error
+}
+
 func fetchPlaylists() tea.Msg {
 	d := daemon.Daemon{}
 	playlists, err := d.GetAllPlaylistNames()
@@ -130,6 +136,25 @@ func fetchPlaylists() tea.Msg {
 	}
 	//Taking the slice playlists[2:] to remove "Library" and "Music"
 	return playlistsMsg{playlists: playlists[2:], err: err}
+}
+
+// fetchAllPlaylists runs in a goroutine to fetch all playlist data with tracks
+func fetchAllPlaylists() tea.Cmd {
+	return func() tea.Msg {
+		d := daemon.Daemon{}
+		playlists, err := d.GetAllPlaylists()
+		if err != nil {
+			return allPlaylistsMsg{playlists: nil, err: err}
+		}
+
+		// Convert slice to map for quick lookup
+		playlistMap := make(map[string]daemon.Playlist)
+		for _, playlist := range playlists {
+			playlistMap[playlist.Name] = playlist
+		}
+
+		return allPlaylistsMsg{playlists: playlistMap, err: nil}
+	}
 }
 
 func (m playlistsModel) Init() tea.Cmd {
@@ -242,6 +267,9 @@ type mainContentModel struct {
 	focused         bool
 	currentPlaylist string
 	cachedAsciiArt  []string // Cache ASCII art to prevent reshuffling
+	// Add references to the main model's cache and loading state
+	playlistCache    *map[string]daemon.Playlist
+	playlistsLoading *bool
 }
 
 func (m mainContentModel) Init() tea.Cmd { return nil }
@@ -266,8 +294,50 @@ func (m mainContentModel) View() string {
 	if m.currentPlaylist != "" {
 		allLines = []string{
 			"Main Content",
-			"",
-			fmt.Sprintf("Selected playlist: %s", m.currentPlaylist),
+		}
+
+		// Check if playlists are still loading
+		if m.playlistsLoading != nil && *m.playlistsLoading {
+			allLines = append(allLines, "Playlists are still being fetched...")
+		} else if m.playlistCache != nil {
+			// Use cached playlist data if available
+			if playlist, exists := (*m.playlistCache)[m.currentPlaylist]; exists {
+				if len(playlist.Tracks) == 0 {
+					allLines = append(allLines, "No tracks found in this playlist.")
+				} else {
+					allLines = append(allLines, "Tracks:")
+					for _, track := range playlist.Tracks {
+						// Truncate track name if too long
+						trackName := track.Name
+						if len(trackName) > m.width-2 {
+							trackName = trackName[:m.width-5] + "..."
+						}
+						allLines = append(allLines, "  - "+trackName)
+					}
+				}
+			} else {
+				// Fallback to fetching playlist if not in cache
+				d := &daemon.Daemon{}
+				playlist, err := d.GetPlaylist(m.currentPlaylist)
+				if err != nil {
+					allLines = append(allLines, fmt.Sprintf("Error fetching playlist: %v", err))
+				} else if len(playlist.Tracks) == 0 {
+					allLines = append(allLines, "No tracks found in this playlist.")
+				} else {
+					allLines = append(allLines, "Tracks:")
+					for _, track := range playlist.Tracks {
+						// Truncate track name if too long
+						trackName := track.Name
+						if len(trackName) > m.width-2 {
+							trackName = trackName[:m.width-5] + "..."
+						}
+						allLines = append(allLines, "  - "+trackName)
+					}
+				}
+			}
+		} else {
+			// No cache available, show error
+			allLines = append(allLines, "Playlist cache not available.")
 		}
 	} else {
 		// Use cached ASCII art if available, otherwise get a random one
@@ -275,7 +345,7 @@ func (m mainContentModel) View() string {
 		if len(asciiLines) == 0 {
 			asciiLines = getRandomAsciiArt()
 		}
-		
+
 		// Build complete content with header
 		allLines = append([]string{"Main Content", ""}, asciiLines...)
 	}
@@ -302,7 +372,7 @@ func (m mainContentModel) View() string {
 		} else {
 			line = " " // Empty line with padding
 		}
-		
+
 		// Truncate line if too long for the width
 		if len(line) > m.width {
 			if m.width > 3 {
@@ -311,9 +381,9 @@ func (m mainContentModel) View() string {
 				line = line[:m.width]
 			}
 		}
-		
+
 		content.WriteString(line)
-		
+
 		// Add newline except for the last line
 		if i < maxLines-1 {
 			content.WriteString("\n")
@@ -363,10 +433,10 @@ func getRandomAsciiArt() []string {
 			"",
 			"             Welcome to Apple Music TUI!",
 			"",
-			"               Controls:",
-			"     [TAB] Navigate  [ENTER] Select",
-			"     [↑↓] Move       [/] Search",
-			"               [Q] Quit",
+			"                      Controls:",
+			"            [TAB] Navigate  [ENTER] Select",
+			"            [↑↓] Move       [/] Search",
+			"                      [Q] Quit",
 		},
 		// Music Note ASCII
 		{
@@ -377,7 +447,7 @@ func getRandomAsciiArt() []string {
 			"    (____  /__|_|  /__| |____/|__|",
 			"         \\/      \\/                  ",
 			"",
-			"           APPLE MUSIC TUI",
+			"	Welcome to Apple Music TUI!",
 			"",
 			"               Controls:",
 			"     [TAB] Navigate  [ENTER] Select",
@@ -392,6 +462,8 @@ func getRandomAsciiArt() []string {
 			" \\__,_|  |_|_|_|  _\\__|   \\_,_|   _|_|_  ",
 			"_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"|_|\"\"\"\"\"| ",
 			"\"`-0-0-'\"`-0-0-'\"`-0-0-'\"`-0-0-'\"`-0-0-' ",
+			"",
+			"	Welcome to Apple Music TUI!",
 			"",
 			"               Controls:",
 			"     [TAB] Navigate  [ENTER] Select",
@@ -408,10 +480,12 @@ func getRandomAsciiArt() []string {
 			"\\ \\__/.\\_\\ \\_\\ \\_\\ \\_\\ \\__\\\\ \\____/\\ \\_\\",
 			"\\/__/\\/_/\\/_/\\/_/\\/_/\\/__/ \\/___/  \\/_/",
 			"",
-			"               Controls:",
-			"     [TAB] Navigate  [ENTER] Select",
-			"     [↑↓] Move       [/] Search",
-			"               [Q] Quit",
+			"	     Welcome to Apple Music TUI!",
+			"",
+			"                     Controls:",
+			"           [TAB] Navigate  [ENTER] Select",
+			"           [↑↓] Move       [/] Search",
+			"                     [Q] Quit",
 		},
 	}
 
@@ -429,7 +503,9 @@ type Model struct {
 	selectedPlaylistItem int
 	ctrlWPressed         bool
 	selectedPlaylist     string
-	randomAscii          []string // Store the randomly selected ASCII art
+	randomAscii          []string                   // Store the randomly selected ASCII art
+	playlistCache        map[string]daemon.Playlist // Cache of all playlists
+	playlistsLoading     bool                       // Flag to track if playlists are still loading
 }
 
 // Styles
@@ -521,10 +597,14 @@ func NewModel() Model {
 	// Generate ASCII art once at startup
 	cachedAscii := getRandomAsciiArt()
 
+	// Initialize the cache and loading state
+	playlistCache := make(map[string]daemon.Playlist)
+	playlistsLoading := true
+
 	// Create leaf nodes
 	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4, textInput: ti})
 	playlistsLeaf, _ := boxer.CreateLeaf("playlists", playlistsModel{width: 30, height: 12, selectedItem: 0, activeItem: -1, focused: true})
-	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false, cachedAsciiArt: cachedAscii})
+	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false, cachedAsciiArt: cachedAscii, playlistCache: &playlistCache, playlistsLoading: &playlistsLoading})
 	instructionsLeaf, _ := boxer.CreateLeaf("instructions", instructionsModel{width: 80, currentFocus: focusPlaylists})
 
 	// Create the layout tree structure
@@ -578,11 +658,16 @@ func NewModel() Model {
 		selectedPlaylistItem: 0,
 		ctrlWPressed:         false,
 		selectedPlaylist:     "",
+		playlistCache:        make(map[string]daemon.Playlist),
+		playlistsLoading:     true,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return fetchPlaylists
+	return tea.Batch(
+		fetchPlaylists,      // Fetch playlist names quickly for UI
+		fetchAllPlaylists(), // Start background fetch of all playlist data
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -604,6 +689,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			pl.lastError = msg.err
 			return pl, nil
 		})
+	case allPlaylistsMsg:
+		// Cache the full playlist data
+		if msg.err != nil {
+			// Handle error - could show a notification or log it
+			fmt.Printf("Error loading playlists: %v\n", msg.err)
+		} else {
+			m.playlistCache = msg.playlists
+		}
+		m.playlistsLoading = false
 	case tea.KeyMsg:
 		// Handle Ctrl+W combinations
 		if m.ctrlWPressed {
@@ -747,6 +841,9 @@ func (m *Model) updateFocus() {
 	m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
 		main := model.(mainContentModel)
 		main.focused = (m.currentFocus == focusMain)
+		// Update cache references to current state
+		main.playlistCache = &m.playlistCache
+		main.playlistsLoading = &m.playlistsLoading
 		return main, nil
 	})
 

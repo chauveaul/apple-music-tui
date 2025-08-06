@@ -210,36 +210,75 @@ func (d *Daemon) RemoveSongFromPlaylist(song Track, playlist Playlist) error {
 }
 
 func (d *Daemon) GetPlaylist(playlistName string) (Playlist, error) {
-	script := fmt.Sprintf(`tell application "Music" to get name of tracks of playlist "%s"`, playlistName)
+	// Fetch all track data in a single AppleScript call (much faster!)
+	script := fmt.Sprintf(`
+tell application "Music"
+	if it is not running then
+		return "Music app is not running"
+	end if
+	
+	try
+		set targetPlaylist to playlist "%s"
+		set trackCount to count of tracks of targetPlaylist
+		
+		if trackCount = 0 then
+			return "NO_TRACKS"
+		end if
+		
+		set outputResult to ""
+		
+		-- Get all tracks in one loop
+		repeat with i from 1 to trackCount
+			set currentTrack to track i of targetPlaylist
+			set trackName to name of currentTrack
+			set trackArtist to artist of currentTrack
+			set trackAlbum to album of currentTrack
+			set trackDuration to duration of currentTrack as string
+			
+			set outputResult to outputResult & trackName & "~" & trackArtist & "~" & trackAlbum & "~" & trackDuration
+			if i < trackCount then set outputResult to outputResult & "||"
+		end repeat
+		
+		return outputResult
+		
+	on error errMsg
+		return "Error: " & errMsg
+	end try
+end tell`, playlistName)
+
 	out, err := get_script_output(script)
 	if err != nil {
 		return Playlist{}, err
 	}
-	names := strings.Split(strings.TrimSpace(string(out)), ", ")
-	tracks := make([]Track, 0, len(names))
-	for _, name := range names {
-		script = fmt.Sprintf(`tell application "Music"
-	set t to (first track of playlist "%s" whose name is "%s")
-	set trackName to name of t
-	set trackArtist to artist of t
-	set trackAlbum to album of t
-	set trackDuration to duration of t as string
-	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration
-end tell`, playlistName, name)
-		out, err := get_script_output(script)
-		if err != nil {
-			continue
-		}
-		parts := strings.Split(strings.TrimSpace(string(out)), "||")
-		if len(parts) == 4 {
-			tracks = append(tracks, Track{
-				Name:     parts[0],
-				Artist:   parts[1],
-				Album:    parts[2],
-				Duration: parts[3],
-			})
+
+	outputStr := strings.TrimSpace(string(out))
+	if strings.HasPrefix(outputStr, "Error:") {
+		return Playlist{}, fmt.Errorf("AppleScript error: %s", outputStr)
+	}
+	if strings.HasPrefix(outputStr, "Music app is not running") {
+		return Playlist{}, fmt.Errorf("Music app is not running")
+	}
+	if outputStr == "NO_TRACKS" {
+		return Playlist{Name: playlistName, Tracks: []Track{}}, nil
+	}
+
+	// Parse the track data
+	tracks := make([]Track, 0)
+	if outputStr != "" {
+		trackStrings := strings.Split(outputStr, "||")
+		for _, trackStr := range trackStrings {
+			trackParts := strings.Split(trackStr, "~")
+			if len(trackParts) == 4 {
+				tracks = append(tracks, Track{
+					Name:     trackParts[0],
+					Artist:   trackParts[1],
+					Album:    trackParts[2],
+					Duration: trackParts[3],
+				})
+			}
 		}
 	}
+
 	return Playlist{Name: playlistName, Tracks: tracks}, nil
 }
 
@@ -260,7 +299,6 @@ func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
 	}
 	playlists := make([]Playlist, 0, len(names))
 	for _, name := range names[2:] {
-		fmt.Println("Playlist name:", name)
 		playlist, err := d.GetPlaylist(name)
 		if err != nil {
 			continue
