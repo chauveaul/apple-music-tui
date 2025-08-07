@@ -111,9 +111,119 @@ func (d *Daemon) PlaySongInPlaylist(songName, playlistName string) error {
 	return run_script(script)
 }
 
+// PlaySongAtPosition plays a song at a specific position (1-based) in a playlist
+func (d *Daemon) PlaySongAtPosition(playlistName string, position int) error {
+	// Escape quotes in playlist name
+	escapedPlaylistName := strings.ReplaceAll(playlistName, `"`, `\"`)
+	
+	script := fmt.Sprintf(`
+tell application "Music"
+	if it is not running then
+		return "ERROR: Music app is not running"
+	end if
+	
+	try
+		-- Try to find the playlist
+		set targetPlaylist to playlist "%s"
+		set trackCount to count of tracks of targetPlaylist
+		
+		if %d > trackCount then
+			return "ERROR: Track position " & %d & " exceeds playlist length of " & trackCount
+		end if
+		
+		if %d < 1 then
+			return "ERROR: Invalid track position: " & %d
+		end if
+		
+		-- Store current shuffle state
+		set originalShuffle to shuffle enabled
+		
+		-- Turn off shuffle to ensure correct track order
+		set shuffle enabled to false
+		
+		-- Play the entire playlist from the beginning
+		play targetPlaylist
+		
+		-- Wait a moment for playback to start
+		delay 0.5
+		
+		-- Skip to the desired position if not already at track 1
+		if %d > 1 then
+			repeat (%d - 1) times
+				next track
+				delay 0.1
+			end repeat
+		end if
+		
+		-- Restore original shuffle state
+		set shuffle enabled to originalShuffle
+		
+		return "SUCCESS: Playing track " & %d & " from playlist " & "%s" & " with remaining tracks in queue"
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`, escapedPlaylistName, position, position, position, position, position, position, position, escapedPlaylistName)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if !strings.HasPrefix(output, "SUCCESS:") {
+		return fmt.Errorf("unexpected AppleScript output: %s", output)
+	}
+	
+	return nil
+}
+
 func (d *Daemon) Pause() error {
 	script := `tell application "Music" to pause`
 	return run_script(script)
+}
+
+// TogglePlayPause toggles between play and pause based on current state
+func (d *Daemon) TogglePlayPause() error {
+	script := `
+tell application "Music"
+	if it is not running then
+		return "ERROR: Music app is not running"
+	end if
+	
+	try
+		set playerState to player state as string
+		
+		if playerState is "playing" then
+			pause
+			return "PAUSED"
+		else
+			play
+			return "PLAYING"
+		end if
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:])
+	}
+	
+	return nil
 }
 
 func (d *Daemon) Stop() error {
@@ -150,7 +260,7 @@ func (d *Daemon) GetVolume() (int, error) {
 }
 
 func (d *Daemon) SetRepeat(repeatType string) error {
-	script := fmt.Sprintf(`tell application "Music" to set repeat mode to "%s"`, repeatType)
+	script := fmt.Sprintf(`tell application "Music" to set song repeat to %s`, repeatType)
 	return run_script(script)
 }
 
@@ -181,6 +291,17 @@ func (d *Daemon) GetShuffle() (bool, error) {
 	return strings.TrimSpace(string(out)) == "true", nil
 }
 
+type PlaybackStatus struct {
+	Track        Track
+	IsPlaying    bool
+	Position     float64 // Current position in seconds
+	Duration     float64 // Total duration in seconds
+	Volume       int
+	Shuffle      bool
+	RepeatMode   string
+	PlayerState  string // "playing", "paused", "stopped"
+}
+
 func (d *Daemon) GetCurrentTrack() (Track, error) {
 	script := `tell application "Music" to get database ID of current track & "||" & name of current track & "||" & artist of current track & "||" & album of current track & "||" & duration of current track as string`
 	out, err := get_script_output(script)
@@ -192,6 +313,99 @@ func (d *Daemon) GetCurrentTrack() (Track, error) {
 		return Track{}, errors.New("Invalid output from get_current_track()")
 	}
 	return Track{Id: parts[0], Name: parts[1], Artist: parts[2], Album: parts[3], Duration: parts[4]}, nil
+}
+
+// GetPlaybackStatus returns comprehensive playback information
+func (d *Daemon) GetPlaybackStatus() (PlaybackStatus, error) {
+	script := `
+tell application "Music"
+	if it is not running then
+		return "ERROR: Music app is not running"
+	end if
+	
+	try
+		-- Get player state
+		set playerState to player state as string
+		
+		-- Get current track info if playing
+		set trackName to ""
+		set trackArtist to ""
+		set trackAlbum to ""
+		set trackDuration to 0
+		set trackId to ""
+		set currentPos to 0
+		
+		if playerState is not "stopped" then
+			try
+				set currentTrack to current track
+				set trackName to name of currentTrack
+				set trackArtist to artist of currentTrack
+				set trackAlbum to album of currentTrack
+				set trackDuration to duration of currentTrack
+				set trackId to database ID of currentTrack
+				set currentPos to player position
+			end try
+		end if
+		
+		-- Get other playback settings
+		set currentVolume to sound volume
+		set isShuffled to shuffle enabled
+		set repeatSetting to song repeat as string
+		
+		-- Build result string
+		return playerState & "|" & trackId & "|" & trackName & "|" & trackArtist & "|" & trackAlbum & "|" & trackDuration & "|" & currentPos & "|" & currentVolume & "|" & isShuffled & "|" & repeatSetting
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return PlaybackStatus{}, fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return PlaybackStatus{}, fmt.Errorf("AppleScript error: %s", output[7:])
+	}
+	
+	parts := strings.Split(output, "|")
+	if len(parts) < 10 {
+		return PlaybackStatus{}, fmt.Errorf("invalid playback status output: expected 10 parts, got %d", len(parts))
+	}
+	
+	// Parse the response
+	playerState := parts[0]
+	trackId := parts[1]
+	trackName := parts[2]
+	trackArtist := parts[3]
+	trackAlbum := parts[4]
+	
+	// Parse numeric values
+	trackDuration, _ := strconv.ParseFloat(parts[5], 64)
+	currentPos, _ := strconv.ParseFloat(parts[6], 64)
+	volume, _ := strconv.Atoi(parts[7])
+	isShuffled := parts[8] == "true"
+	repeatMode := parts[9]
+	
+	return PlaybackStatus{
+		Track: Track{
+			Id:       trackId,
+			Name:     trackName,
+			Artist:   trackArtist,
+			Album:    trackAlbum,
+			Duration: parts[5], // Keep as string for compatibility
+		},
+		IsPlaying:   playerState == "playing",
+		Position:    currentPos,
+		Duration:    trackDuration,
+		Volume:      volume,
+		Shuffle:     isShuffled,
+		RepeatMode:  repeatMode,
+		PlayerState: playerState,
+	}, nil
 }
 
 func (d *Daemon) PlayPlaylist(playlist Playlist) error {
@@ -374,6 +588,38 @@ end tell`
 		return nil, fmt.Errorf("Encountered an error in apple script %s", string(out))
 	}
 	return parse_queue_output(out)
+}
+
+// ToggleShuffle toggles the shuffle setting
+func (d *Daemon) ToggleShuffle() error {
+	currentShuffle, err := d.GetShuffle()
+	if err != nil {
+		return fmt.Errorf("failed to get current shuffle state: %w", err)
+	}
+	return d.SetShuffle(!currentShuffle)
+}
+
+// CycleRepeatMode cycles through repeat modes: off -> all -> one -> off
+func (d *Daemon) CycleRepeatMode() error {
+	currentMode, err := d.GetRepeatMode()
+	if err != nil {
+		return fmt.Errorf("failed to get current repeat mode: %w", err)
+	}
+	
+	var nextMode string
+	switch strings.ToLower(currentMode) {
+	case "off":
+		nextMode = "all"
+	case "all":
+		nextMode = "one"
+	case "one":
+		nextMode = "off"
+	default:
+		// Default to "all" if we get an unexpected mode
+		nextMode = "all"
+	}
+	
+	return d.SetRepeat(nextMode)
 }
 
 func (d *Daemon) AddToQueue(track Track) error {
