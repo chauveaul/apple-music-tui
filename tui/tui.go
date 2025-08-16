@@ -9,7 +9,6 @@ import (
 
 	"main/daemon"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
@@ -23,33 +22,64 @@ const (
 	focusSearch focusArea = iota
 	focusPlaylists
 	focusMain
+	focusQueue
 )
 
 // Component models for bubbleboxer
 type searchHelpModel struct {
 	width, height int
-	textInput     textinput.Model
+	searchText    string
+	cursorPos     int
 	searching     bool
 }
 
 func (m searchHelpModel) Init() tea.Cmd {
-	ti := textinput.New()
-	ti.Placeholder = "Search..."
-	ti.Focus()
-	ti.CharLimit = 156
-	ti.Width = 20
 	return nil
 }
+
 func (m searchHelpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-	}
-
-	if m.searching {
-		m.textInput, cmd = m.textInput.Update(msg)
+	case tea.KeyMsg:
+		if m.searching {
+			switch msg.String() {
+			case "backspace":
+				if len(m.searchText) > 0 && m.cursorPos > 0 {
+					// Remove character before cursor
+					m.searchText = m.searchText[:m.cursorPos-1] + m.searchText[m.cursorPos:]
+					m.cursorPos--
+				}
+			case "delete":
+				if m.cursorPos < len(m.searchText) {
+					// Remove character at cursor
+					m.searchText = m.searchText[:m.cursorPos] + m.searchText[m.cursorPos+1:]
+				}
+			case "left":
+				if m.cursorPos > 0 {
+					m.cursorPos--
+				}
+			case "right":
+				if m.cursorPos < len(m.searchText) {
+					m.cursorPos++
+				}
+			case "home", "ctrl+a":
+				m.cursorPos = 0
+			case "end", "ctrl+e":
+				m.cursorPos = len(m.searchText)
+			default:
+				// Insert regular characters
+				if len(msg.String()) == 1 && msg.String() != "\n" && msg.String() != "\r" {
+					if len(m.searchText) < 156 { // Character limit
+						// Insert character at cursor position
+						m.searchText = m.searchText[:m.cursorPos] + msg.String() + m.searchText[m.cursorPos:]
+						m.cursorPos++
+					}
+				}
+			}
+		}
 	}
 
 	return m, cmd
@@ -64,7 +94,29 @@ func (m searchHelpModel) View() string {
 	lines = append(lines, titleStyle.Render("Search"))
 	lines = append(lines, "")
 	if m.searching {
-		lines = append(lines, m.textInput.View())
+		// Create custom search input display
+		var searchDisplay strings.Builder
+		if len(m.searchText) == 0 {
+			// Show placeholder when empty
+			searchDisplay.WriteString("Search...")
+		} else {
+			// Show actual text with cursor
+			for i, char := range m.searchText {
+				if i == m.cursorPos && m.searching {
+					// Show cursor as underscore before character
+					searchDisplay.WriteString("_")
+				}
+				searchDisplay.WriteRune(char)
+			}
+			// Show cursor at end if needed
+			if m.cursorPos >= len(m.searchText) {
+				searchDisplay.WriteString("_")
+			}
+		}
+		
+		// Wrap in simple brackets to indicate input field
+		searchLine := "[" + searchDisplay.String() + "]"
+		lines = append(lines, searchLine)
 	} else {
 		lines = append(lines, "[Search box]")
 	}
@@ -221,19 +273,32 @@ func (m playlistsModel) View() string {
 	// Add visible playlist items
 	for i := startIdx; i < endIdx; i++ {
 		item := playlistItems[i]
+		
+		// Calculate available space for the playlist name (accounting for prefix and ellipsis)
+		availableWidth := m.width - 2 // "  " or "> " prefix
+		if availableWidth < 1 {
+			availableWidth = 1
+		}
+		
+		// Truncate the item name first, before applying any styling
+		truncatedItem := item
+		if runewidth.StringWidth(item) > availableWidth {
+			// Reserve space for ellipsis
+			truncatedItem = runewidth.Truncate(item, availableWidth-3, "...")
+		}
+		
+		// Now apply styling only to the (possibly truncated) playlist name
 		var line string
 		if i == m.activeItem {
-			line = activeItemStyle.Render("> " + item)
+			// Only style the playlist name, not the prefix
+			line = "> " + activeItemStyle.Render(truncatedItem)
 		} else if m.focused && i == m.selectedItem {
-			line = unfocusedSelectedItemStyle.Render("> " + item)
+			// Only style the playlist name, not the prefix
+			line = "> " + unfocusedSelectedItemStyle.Render(truncatedItem)
 		} else {
-			line = "  " + item
+			line = "  " + truncatedItem
 		}
-
-		// Truncate line if too long
-		if runewidth.StringWidth(line) > m.width {
-			line = runewidth.Truncate(line, m.width-3, "...")
-		}
+		
 		allLines = append(allLines, line)
 	}
 
@@ -833,11 +898,11 @@ func (m instructionsModel) View() string {
 	// Build the instruction text based on current focus
 	var instructions string
 	if m.currentFocus == focusMain {
-		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter play song • Space play/pause • s shuffle • r repeat", focusName[m.currentFocus])
+		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter play song • Space play/pause • s shuffle • r repeat • +/- volume", focusName[m.currentFocus])
 	} else if m.currentFocus == focusSearch {
-		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter select • / search • Space play/pause • s shuffle • r repeat", focusName[m.currentFocus])
+		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter select • / search • Space play/pause • s shuffle • r repeat • +/- volume", focusName[m.currentFocus])
 	} else {
-		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter select • Space play/pause • s shuffle • r repeat", focusName[m.currentFocus])
+		instructions = fmt.Sprintf("Focus: %s | 'q' quit • Tab cycle • Ctrl+W+hjkl vim nav • ↑↓ navigate • Enter select • Space play/pause • s shuffle • r repeat • +/- volume", focusName[m.currentFocus])
 	}
 
 	// Truncate if the instructions are too long for the available width
@@ -931,6 +996,270 @@ func getRandomAsciiArt() []string {
 	return asciiArts[rand.Intn(len(asciiArts))]
 }
 
+// QueueModel represents the queue overlay
+type queueModel struct {
+	width, height    int
+	queueInfo        *daemon.QueueInfo
+	selectedItem     int
+	scrollOffset     int
+	visible          bool
+	loading          bool
+	lastError        error
+}
+
+// Message for queue info
+type queueInfoMsg struct {
+	info *daemon.QueueInfo
+	err  error
+}
+
+// fetchQueueInfo gets the current queue information
+func fetchQueueInfo() tea.Cmd {
+	return func() tea.Msg {
+		d := daemon.Daemon{}
+		info, err := d.GetQueueInfo()
+		return queueInfoMsg{info: info, err: err}
+	}
+}
+
+func (m queueModel) Init() tea.Cmd {
+	return fetchQueueInfo()
+}
+
+func (m queueModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case queueInfoMsg:
+		m.queueInfo = msg.info
+		m.lastError = msg.err
+		m.loading = false
+	}
+	return m, nil
+}
+
+func (m queueModel) View() string {
+	if !m.visible {
+		return ""
+	}
+
+	// Calculate overlay dimensions (80% of screen)
+	overlayWidth := int(float64(m.width) * 0.8)
+	overlayHeight := int(float64(m.height) * 0.8)
+	if overlayWidth < 40 {
+		overlayWidth = 40
+	}
+	if overlayHeight < 10 {
+		overlayHeight = 10
+	}
+
+	// Ensure overlay doesn't exceed terminal bounds
+	if overlayWidth > m.width {
+		overlayWidth = m.width
+	}
+	if overlayHeight > m.height {
+		overlayHeight = m.height
+	}
+
+	// Center the overlay
+	leftPadding := (m.width - overlayWidth) / 2
+	topPadding := (m.height - overlayHeight) / 2
+
+	// Create the full screen overlay with transparent background
+	var content strings.Builder
+
+	// Render each line of the full terminal
+	for row := 0; row < m.height; row++ {
+		if row > 0 {
+			content.WriteString("\n")
+		}
+
+		// Check if this row is within the overlay area
+		if row >= topPadding && row < topPadding+overlayHeight {
+			// This row contains overlay content
+			overlayRow := row - topPadding
+			
+			// Add left transparent padding
+			for col := 0; col < leftPadding; col++ {
+				content.WriteString(" ")
+			}
+
+			// Add overlay content
+			if overlayRow == 0 {
+				// Top border
+				content.WriteString("┌" + strings.Repeat("─", overlayWidth-2) + "┐")
+			} else if overlayRow == overlayHeight-1 {
+				// Bottom border
+				content.WriteString("└" + strings.Repeat("─", overlayWidth-2) + "┘")
+			} else {
+				// Content area
+				content.WriteString("│")
+
+				// Add content based on line
+				contentLine := m.getContentLine(overlayRow-1, overlayWidth-2)
+				
+				// Use Unicode-aware width calculation for proper padding
+				contentWidth := runewidth.StringWidth(contentLine)
+				availableContentWidth := overlayWidth - 2 // Account for left and right borders
+				
+				// Truncate content if it's too wide
+				if contentWidth > availableContentWidth {
+					contentLine = runewidth.Truncate(contentLine, availableContentWidth, "")
+					contentWidth = availableContentWidth
+				}
+				
+				// Add the content
+				content.WriteString(contentLine)
+				
+				// Add padding to fill remaining space
+				padding := availableContentWidth - contentWidth
+				if padding > 0 {
+					content.WriteString(strings.Repeat(" ", padding))
+				}
+				
+				content.WriteString("│")
+			}
+
+			// Add right transparent padding
+			rightPadding := m.width - leftPadding - overlayWidth
+			for col := 0; col < rightPadding; col++ {
+				content.WriteString(" ")
+			}
+		} else {
+			// This row is outside the overlay - make it transparent
+			for col := 0; col < m.width; col++ {
+				content.WriteString(" ")
+			}
+		}
+	}
+
+	return content.String()
+}
+
+func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
+	if m.loading {
+		if lineIndex == 1 {
+			return " Loading queue information..."
+		}
+		return ""
+	}
+
+	if m.lastError != nil {
+		if lineIndex == 1 {
+			return fmt.Sprintf(" Error: %v", m.lastError)
+		} else if lineIndex == 3 {
+			return " Press 'u' to refresh or 'Esc' to close"
+		}
+		return ""
+	}
+
+	if m.queueInfo == nil {
+		if lineIndex == 1 {
+			return " No queue available - play a playlist to create one"
+		} else if lineIndex == 3 {
+			return " Press 'Esc' to close"
+		}
+		return ""
+	}
+
+	// Header lines
+	if lineIndex == 0 {
+		queueTitle := "amtui Queue"
+		if m.queueInfo.QueueName == "amtui Queue" {
+			return fmt.Sprintf(" 🎵 %s (%d tracks)", queueTitle, m.queueInfo.TotalTracks)
+		} else {
+			return fmt.Sprintf(" 🎵 Current Playlist: %s (%d tracks)", m.queueInfo.QueueName, m.queueInfo.TotalTracks)
+		}
+	}
+	if lineIndex == 1 {
+		return ""
+	}
+
+	// Current track info
+	if lineIndex == 2 {
+		if m.queueInfo.CurrentTrack != nil {
+			currentInfo := fmt.Sprintf(" ♪ Now Playing: %s - %s (Track %d)", 
+				m.queueInfo.CurrentTrack.Name, m.queueInfo.CurrentTrack.Artist, m.queueInfo.CurrentPosition)
+			if len(currentInfo) > maxWidth {
+				currentInfo = currentInfo[:maxWidth-3] + "..."
+			}
+			return currentInfo
+		} else {
+			return " ♪ No track currently playing"
+		}
+	}
+
+	// Separator
+	if lineIndex == 3 {
+		return " " + strings.Repeat("─", maxWidth-2)
+	}
+
+	// Instructions
+	if lineIndex == 4 {
+		return " Navigation: ↑↓ select • Enter skip to track • Esc close • u refresh"
+	}
+
+	// Empty line for spacing
+	if lineIndex == 5 {
+		return ""
+	}
+
+	// Queue tracks header
+	if lineIndex == 6 {
+		return " Upcoming Tracks in Queue:"
+	}
+
+	if lineIndex >= 7 {
+		// Show only upcoming tracks (excluding currently playing song)
+		if m.queueInfo.CurrentPosition <= 0 {
+			// If no current position, show all tracks
+			trackIndex := lineIndex - 7 + m.scrollOffset
+			if trackIndex < len(m.queueInfo.Tracks) {
+				track := m.queueInfo.Tracks[trackIndex]
+				prefix := "   "
+				
+				// Highlight selected item
+				if trackIndex == m.selectedItem {
+					prefix = " > "
+				}
+
+				// Show track info with position number
+				trackInfo := fmt.Sprintf("%s%d. %s - %s", prefix, trackIndex+1, track.Name, track.Artist)
+				if len(trackInfo) > maxWidth {
+					trackInfo = trackInfo[:maxWidth-3] + "..."
+				}
+				return trackInfo
+			}
+		} else {
+			// Show tracks starting AFTER the current position (exclude currently playing)
+			currentPosIndex := m.queueInfo.CurrentPosition - 1 // Convert to 0-based
+			upcomingTrackIndex := lineIndex - 7 + m.scrollOffset
+			actualTrackIndex := currentPosIndex + 1 + upcomingTrackIndex // +1 to skip current track
+			
+			if actualTrackIndex < len(m.queueInfo.Tracks) {
+				track := m.queueInfo.Tracks[actualTrackIndex]
+				prefix := "   "
+				
+				// Adjust selected item to work with upcoming tracks display (exclude current)
+				adjustedSelectedItem := m.selectedItem - currentPosIndex - 1 // -1 to account for skipped current track
+				if upcomingTrackIndex == adjustedSelectedItem {
+					prefix = " > "
+				}
+
+				// Show track info with original position number
+				trackInfo := fmt.Sprintf("%s%d. %s - %s", prefix, actualTrackIndex+1, track.Name, track.Artist)
+				if len(trackInfo) > maxWidth {
+					trackInfo = trackInfo[:maxWidth-3] + "..."
+				}
+				return trackInfo
+			}
+		}
+	}
+
+	return ""
+}
+
 // Model represents the application state using bubbleboxer
 type Model struct {
 	boxer                bubbleboxer.Boxer
@@ -943,6 +1272,11 @@ type Model struct {
 	playlistsLoading     bool                       // Flag to track if playlists are still loading
 	// Track terminal size for yabai compatibility
 	lastWidth, lastHeight int
+	// Queue overlay
+	queueOverlay queueModel
+	queueVisible bool
+	// Track change detection for automatic queue cleanup
+	lastPlayingTrack string // Track ID of the last playing track to detect changes
 }
 
 // Styles
@@ -1027,6 +1361,13 @@ var (
 	tableHeaderStyle = lipgloss.NewStyle().
 				Foreground(mutedColor).
 				Bold(true)
+
+	// Queue overlay styles
+	queueOverlayStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1A1A1A")).
+				Foreground(textColor).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(focusedBorder)
 )
 
 // NewModel creates and returns a new TUI model
@@ -1034,11 +1375,6 @@ func NewModel() Model {
 	boxer := bubbleboxer.Boxer{
 		ModelMap: make(map[string]tea.Model),
 	}
-
-	ti := textinput.New()
-	ti.Placeholder = "Search for playlists..."
-	ti.CharLimit = 156
-	ti.Width = 20
 
 	// Generate ASCII art once at startup
 	cachedAscii := getRandomAsciiArt()
@@ -1048,7 +1384,7 @@ func NewModel() Model {
 	playlistsLoading := true
 
 	// Create leaf nodes
-	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4, textInput: ti})
+	searchHelpLeaf, _ := boxer.CreateLeaf("searchHelp", searchHelpModel{width: 30, height: 4, searchText: "", cursorPos: 0, searching: false})
 	playlistsLeaf, _ := boxer.CreateLeaf("playlists", playlistsModel{width: 30, height: 12, selectedItem: 0, activeItem: -1, focused: true})
 	mainLeaf, _ := boxer.CreateLeaf("main", mainContentModel{width: 50, height: 24, currentPlaylist: "", focused: false, cachedAsciiArt: cachedAscii, playlistCache: &playlistCache, playlistsLoading: &playlistsLoading})
 	playbackLeaf, _ := boxer.CreateLeaf("playback", playbackModel{width: 80, height: 3})
@@ -1122,6 +1458,8 @@ func NewModel() Model {
 		selectedPlaylist:     "",
 		playlistCache:        make(map[string]daemon.Playlist),
 		playlistsLoading:     true,
+		queueOverlay:         queueModel{visible: false, loading: false},
+		queueVisible:         false,
 	}
 }
 
@@ -1179,6 +1517,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = playbackCmd
 			}
 		}
+	case queueInfoMsg:
+		// Update the queue overlay with the new information
+		m.queueOverlay.queueInfo = msg.info
+		m.queueOverlay.lastError = msg.err
+		m.queueOverlay.loading = false
+		// Update dimensions based on current terminal size
+		m.queueOverlay.width = m.lastWidth
+		m.queueOverlay.height = m.lastHeight
 	case sizeCheckMsg:
 		// Aggressive size check for yabai compatibility
 		// Force immediate refresh to catch size changes
@@ -1207,6 +1553,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			fmt.Printf("\rTerminal size changed: %dx%d -> %dx%d\n", prevWidth, prevHeight, msg.Width, msg.Height)
 		}
 	case tea.KeyMsg:
+		// Handle queue overlay navigation first
+		if m.queueVisible {
+			switch msg.String() {
+			case "q", "esc":
+				// Close queue overlay
+				m.queueVisible = false
+				m.queueOverlay.visible = false
+				return m, nil
+			case "u":
+				// Refresh queue info
+				m.queueOverlay.loading = true
+				return m, fetchQueueInfo()
+			case "up", "k":
+				// Navigate up in queue (upcoming tracks only - excluding current)
+				if m.queueOverlay.queueInfo != nil && len(m.queueOverlay.queueInfo.Tracks) > 0 {
+					// Calculate minimum position for upcoming tracks (after current track)
+					minPosition := 0
+					if m.queueOverlay.queueInfo.CurrentPosition > 0 {
+						minPosition = m.queueOverlay.queueInfo.CurrentPosition // First upcoming track (0-based)
+					}
+					
+					if m.queueOverlay.selectedItem > minPosition {
+						m.queueOverlay.selectedItem--
+						// Update scroll offset if needed
+						if m.queueOverlay.selectedItem < m.queueOverlay.scrollOffset {
+							m.queueOverlay.scrollOffset = m.queueOverlay.selectedItem
+						}
+					}
+				}
+				return m, nil
+			case "down", "j":
+				// Navigate down in queue (upcoming tracks only)
+				if m.queueOverlay.queueInfo != nil && len(m.queueOverlay.queueInfo.Tracks) > 0 {
+					if m.queueOverlay.selectedItem < len(m.queueOverlay.queueInfo.Tracks)-1 {
+						m.queueOverlay.selectedItem++
+						// Update scroll offset if needed
+						visibleTracks := 15 // Approximate visible tracks in overlay (accounting for header)
+						if m.queueOverlay.selectedItem >= m.queueOverlay.scrollOffset+visibleTracks {
+							m.queueOverlay.scrollOffset = m.queueOverlay.selectedItem - visibleTracks + 1
+						}
+					}
+				}
+				return m, nil
+				case "enter":
+					// Skip to selected song in queue
+					if m.queueOverlay.queueInfo != nil && len(m.queueOverlay.queueInfo.Tracks) > 0 {
+						// Use the selected item directly as the track index (0-based)
+						if m.queueOverlay.selectedItem >= 0 && m.queueOverlay.selectedItem < len(m.queueOverlay.queueInfo.Tracks) {
+							// Skip to the selected track using daemon (1-based indexing)
+							// When playing from queue, we want to disable shuffle to maintain queue order
+							d := daemon.Daemon{}
+							go func() {
+								// Temporarily disable shuffle for queue playback
+								currentShuffle, shuffleErr := d.GetShuffle()
+								if shuffleErr == nil && currentShuffle {
+									d.SetShuffle(false)
+								}
+								
+								err := d.SkipToQueuePosition(m.queueOverlay.selectedItem + 1) // Convert to 1-based
+								if err != nil {
+									fmt.Printf("Error skipping to track: %v\n", err)
+								}
+								
+								// Keep shuffle disabled for queue playback
+								// Don't restore it since we want the queue to play in order
+							}()
+							// Close overlay after action
+							m.queueVisible = false
+							m.queueOverlay.visible = false
+						}
+					}
+					return m, nil
+			default:
+				// Ignore other keys when queue overlay is visible
+				return m, nil
+			}
+		}
+
 		// Handle Ctrl+W combinations
 		if m.ctrlWPressed {
 			m.ctrlWPressed = false
@@ -1235,7 +1659,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Clear search and return to playlists
 				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
 					sh := model.(searchHelpModel)
-					sh.textInput.SetValue("")
+					sh.searchText = ""
+					sh.cursorPos = 0
 					return sh, nil
 				})
 				m.currentFocus = focusPlaylists
@@ -1253,11 +1678,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}()
 				return m, nil
 			default:
-				// Forward all other key events to the search input
+				// Forward all other key events to the search input for custom handling
 				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
 					sh := model.(searchHelpModel)
-					var inputCmd tea.Cmd
-					sh.textInput, inputCmd = sh.textInput.Update(msg)
+					// The custom input handling is already done in the searchHelpModel.Update method
+					// This will be handled by our custom search input logic
+					updatedSh, inputCmd := sh.Update(msg)
+					sh = updatedSh.(searchHelpModel)
 					if inputCmd != nil {
 						cmd = inputCmd
 					}
@@ -1278,6 +1705,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+w":
 			m.ctrlWPressed = true
+
+		case "Q":
+			// Toggle queue overlay with capital Q
+			if m.queueVisible {
+				m.queueVisible = false
+				m.queueOverlay.visible = false
+			} else {
+				m.queueVisible = true
+				m.queueOverlay.visible = true
+				// Update overlay dimensions
+				m.queueOverlay.width = m.lastWidth
+				m.queueOverlay.height = m.lastHeight
+				// Start loading queue info
+				m.queueOverlay.loading = true
+				return m, fetchQueueInfo()
+			}
+			return m, nil
 
 		case " ":
 			// Space key: toggle play/pause (works in any focus area except search)
@@ -1307,19 +1751,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-		case "r":
-			// R key: cycle repeat mode (works in any focus area except search)
-			if m.currentFocus != focusSearch {
-				d := daemon.Daemon{}
-				go func() {
-					err := d.CycleRepeatMode()
-					if err != nil {
-						// Could add error handling here, maybe show in UI
-						fmt.Printf("Error cycling repeat mode: %v\n", err)
-					}
-				}()
-				return m, nil
-			}
+	case "r":
+		// R key: cycle repeat mode (works in any focus area except search)
+		if m.currentFocus != focusSearch {
+			d := daemon.Daemon{}
+			go func() {
+				err := d.CycleRepeatMode()
+				if err != nil {
+					// Could add error handling here, maybe show in UI
+					fmt.Printf("Error cycling repeat mode: %v\n", err)
+				}
+			}()
+			return m, nil
+		}
+
+	case "+", "=":
+		// + key: volume up (works in any focus area except search)
+		if m.currentFocus != focusSearch {
+			d := daemon.Daemon{}
+			go func() {
+				// Get current volume first
+				currentVol, err := d.GetVolume()
+				if err != nil {
+					fmt.Printf("Error getting volume: %v\n", err)
+					return
+				}
+				
+				// Increase by 10%, max at 100
+				newVol := currentVol + 10
+				if newVol > 100 {
+					newVol = 100
+				}
+				
+				err = d.SetVolume(newVol)
+				if err != nil {
+					fmt.Printf("Error setting volume: %v\n", err)
+				}
+			}()
+			return m, nil
+		}
+
+	case "-":
+		// - key: volume down (works in any focus area except search)
+		if m.currentFocus != focusSearch {
+			d := daemon.Daemon{}
+			go func() {
+				// Get current volume first
+				currentVol, err := d.GetVolume()
+				if err != nil {
+					fmt.Printf("Error getting volume: %v\n", err)
+					return
+				}
+				
+				// Decrease by 10%, min at 0
+				newVol := currentVol - 10
+				if newVol < 0 {
+					newVol = 0
+				}
+				
+				err = d.SetVolume(newVol)
+				if err != nil {
+					fmt.Printf("Error setting volume: %v\n", err)
+				}
+			}()
+			return m, nil
+		}
 
 		case "enter":
 			if m.currentFocus == focusPlaylists {
@@ -1340,6 +1836,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					main.scrollOffset = 0 // Reset scroll position
 					return main, nil
 				})
+				// Automatically switch focus to main content for better UX
+				m.currentFocus = focusMain
+				m.updateFocus()
 			} else if m.currentFocus == focusMain {
 				// Play the selected song
 				if m.selectedPlaylist != "" {
@@ -1408,11 +1907,7 @@ func (m *Model) updateFocus() {
 	m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
 		sh := model.(searchHelpModel)
 		sh.searching = (m.currentFocus == focusSearch)
-		if sh.searching {
-			sh.textInput.Focus()
-		} else {
-			sh.textInput.Blur()
-		}
+		// No need to focus/blur since we're using custom input handling
 		return sh, nil
 	})
 
@@ -1524,8 +2019,24 @@ func (m Model) View() string {
 	tempModel := m
 	tempModel.updateFocus()
 
+	// Get the base layout from bubbleboxer
+	baseView := tempModel.boxer.View()
+
+	// If queue overlay is visible, render it on top
+	if m.queueVisible {
+		// Update the queue overlay dimensions to match current terminal size
+		m.queueOverlay.width = m.lastWidth
+		m.queueOverlay.height = m.lastHeight
+		// Render the queue overlay on top of the base view
+		queueOverlayView := m.queueOverlay.View()
+		if queueOverlayView != "" {
+			// The queue overlay should completely cover the base view
+			return queueOverlayView
+		}
+	}
+
 	// Use bubbleboxer to render the layout
-	return baseStyle.Render(tempModel.boxer.View())
+	return baseStyle.Render(baseView)
 }
 
 // Run starts the TUI application

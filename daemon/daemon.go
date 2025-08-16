@@ -68,10 +68,14 @@ func parse_queue_output(out []byte) (*QueueInfo, error) {
 	}
 
 	var tracks []Track
-	if len(parts) > 7 && parts[7] != "" {
-		trackStrings := strings.Split(parts[7], "||")
-		for _, trackStr := range trackStrings {
-			trackParts := strings.Split(trackStr, "~")
+	if len(parts) > 7 {
+		// Tracks are in parts[7], parts[9], parts[11], etc. (every odd index after 7)
+		// because the AppleScript uses || as separator, which creates empty parts when split by |
+		for i := 7; i < len(parts); i += 2 {
+			if parts[i] == "" {
+				continue
+			}
+			trackParts := strings.Split(parts[i], "~")
 			if len(trackParts) != 5 {
 				continue
 			}
@@ -112,10 +116,24 @@ func (d *Daemon) PlaySongInPlaylist(songName, playlistName string) error {
 }
 
 // PlaySongAtPosition plays a song at a specific position (1-based) in a playlist
+// and creates/updates the amtui Queue with all tracks from the playlist
 func (d *Daemon) PlaySongAtPosition(playlistName string, position int) error {
-	// Escape quotes in playlist name
-	escapedPlaylistName := strings.ReplaceAll(playlistName, `"`, `\"`)
+	// Get the target song info before creating the queue
+	playlist, err := d.GetPlaylist(playlistName)
+	if err != nil {
+		return fmt.Errorf("failed to get playlist: %w", err)
+	}
+	if position < 1 || position > len(playlist.Tracks) {
+		return fmt.Errorf("invalid position %d for playlist with %d tracks", position, len(playlist.Tracks))
+	}
+	targetTrack := playlist.Tracks[position-1] // Convert to 0-based index
 	
+	// Create/update the queue with the selected song at the top, followed by shuffled remaining tracks
+	if err := d.CreateOrUpdateQueueWithSelectedFirst(playlistName, position); err != nil {
+		return fmt.Errorf("failed to create queue from playlist: %w", err)
+	}
+	
+	// Now play the queue from the beginning (selected song is at position 1)
 	script := fmt.Sprintf(`
 tell application "Music"
 	if it is not running then
@@ -123,48 +141,22 @@ tell application "Music"
 	end if
 	
 	try
-		-- Try to find the playlist
-		set targetPlaylist to playlist "%s"
-		set trackCount to count of tracks of targetPlaylist
+		-- Use the amtui Queue playlist
+		set targetPlaylist to user playlist "amtui Queue"
 		
-		if %d > trackCount then
-			return "ERROR: Track position " & %d & " exceeds playlist length of " & trackCount
-		end if
-		
-		if %d < 1 then
-			return "ERROR: Invalid track position: " & %d
-		end if
-		
-		-- Store current shuffle state
-		set originalShuffle to shuffle enabled
-		
-		-- Turn off shuffle to ensure correct track order
+		-- Disable shuffle to maintain queue order
 		set shuffle enabled to false
 		
-		-- Play the entire playlist from the beginning
+		-- Play the queue from the beginning (selected song is now at position 1)
 		play targetPlaylist
 		
-		-- Wait a moment for playback to start
-		delay 0.5
-		
-		-- Skip to the desired position if not already at track 1
-		if %d > 1 then
-			repeat (%d - 1) times
-				next track
-				delay 0.1
-			end repeat
-		end if
-		
-		-- Restore original shuffle state
-		set shuffle enabled to originalShuffle
-		
-		return "SUCCESS: Playing track " & %d & " from playlist " & "%s" & " with remaining tracks in queue"
+		return "SUCCESS: Playing track \"" & "%s" & "\" from shuffled queue (source: %s)"
 		
 	on error errMsg
 		return "ERROR: " & errMsg
 	end try
 end tell
-	`, escapedPlaylistName, position, position, position, position, position, position, position, escapedPlaylistName)
+	`, strings.ReplaceAll(targetTrack.Name, `"`, `\"`), playlistName)
 	
 	out, err := get_script_output(script)
 	if err != nil {
@@ -620,6 +612,352 @@ func (d *Daemon) CycleRepeatMode() error {
 	}
 	
 	return d.SetRepeat(nextMode)
+}
+
+// CreateOrUpdateQueue creates or updates the amtui Queue playlist with tracks from the specified playlist
+// If shuffle is enabled, it will shuffle the tracks before adding them to the queue
+func (d *Daemon) CreateOrUpdateQueue(sourcePlaylist string) error {
+	// Escape quotes in playlist name
+	escapedSourcePlaylist := strings.ReplaceAll(sourcePlaylist, `"`, `\"`)
+	
+	script := fmt.Sprintf(`
+	tell application "Music"
+		if it is not running then
+			error "Music app is not running"
+		end if
+		
+		try
+			-- Check if source playlist exists
+			set sourcePlaylist to playlist "%s"
+			set sourceTracks to tracks of sourcePlaylist
+			set trackCount to count of sourceTracks
+			
+			-- Check if shuffle is enabled
+			set isShuffled to shuffle enabled
+			
+			-- Check if amtui Queue exists, create if it doesn't
+			try
+				set queuePlaylist to user playlist "amtui Queue"
+				-- Clear existing tracks from queue
+				delete tracks of queuePlaylist
+			on error
+				-- Create the playlist if it doesn't exist
+				set queuePlaylist to (make new user playlist with properties {name:"amtui Queue"})
+			end try
+			
+			if isShuffled then
+				-- Create a list of track indices for shuffling
+				set trackIndices to {}
+				repeat with i from 1 to trackCount
+					set end of trackIndices to i
+				end repeat
+				
+				-- Shuffle the indices using Fisher-Yates algorithm
+				repeat with i from trackCount to 2 by -1
+					set j to (random number from 1 to i)
+					set temp to item i of trackIndices
+					set item i of trackIndices to item j of trackIndices
+					set item j of trackIndices to temp
+				end repeat
+				
+				-- Add tracks in shuffled order
+				repeat with shuffledIndex in trackIndices
+					set sourceTrack to track shuffledIndex of sourcePlaylist
+					duplicate sourceTrack to queuePlaylist
+				end repeat
+			else
+				-- Add all tracks in original order
+				repeat with sourceTrack in sourceTracks
+					duplicate sourceTrack to queuePlaylist
+				end repeat
+			end if
+			
+			if isShuffled then
+				return "SUCCESS: Created shuffled amtui Queue with " & trackCount & " tracks from " & "%s"
+			else
+				return "SUCCESS: Created amtui Queue with " & trackCount & " tracks from " & "%s"
+			end if
+			
+		on error errMsg
+			error "Failed to create queue: " & errMsg
+	end try
+end tell
+	`, escapedSourcePlaylist, escapedSourcePlaylist, escapedSourcePlaylist)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "Failed to create queue:") {
+		return fmt.Errorf("Queue creation failed: %s", output[23:]) // Remove "Failed to create queue: " prefix
+	}
+	
+	if !strings.HasPrefix(output, "SUCCESS:") {
+		return fmt.Errorf("unexpected AppleScript output: %s", output)
+	}
+	
+	return nil
+}
+
+// CreateOrUpdateQueueWithSelectedFirst creates a queue with the selected song first, followed by shuffled remaining tracks
+func (d *Daemon) CreateOrUpdateQueueWithSelectedFirst(sourcePlaylist string, selectedPosition int) error {
+	// Escape quotes in playlist name
+	escapedSourcePlaylist := strings.ReplaceAll(sourcePlaylist, `"`, `\"`)
+	
+	script := fmt.Sprintf(`
+	tell application "Music"
+		if it is not running then
+			error "Music app is not running"
+		end if
+		
+		try
+			-- Check if source playlist exists
+			set sourcePlaylist to playlist "%s"
+			set sourceTracks to tracks of sourcePlaylist
+			set trackCount to count of sourceTracks
+			
+			if %d < 1 or %d > trackCount then
+				error "Invalid selected position: " & %d
+			end if
+			
+			-- Get the selected track
+			set selectedTrack to track %d of sourcePlaylist
+			
+			-- Check if amtui Queue exists, create if it doesn't
+			try
+				set queuePlaylist to user playlist "amtui Queue"
+				-- Clear existing tracks from queue
+				delete tracks of queuePlaylist
+			on error
+				-- Create the playlist if it doesn't exist
+				set queuePlaylist to (make new user playlist with properties {name:"amtui Queue"})
+			end try
+			
+			-- First, add the selected track at the top
+			duplicate selectedTrack to queuePlaylist
+			
+			-- Create a list of remaining track indices (excluding the selected one)
+			set remainingIndices to {}
+			repeat with i from 1 to trackCount
+				if i is not %d then
+					set end of remainingIndices to i
+				end if
+			end repeat
+			
+			-- Shuffle the remaining indices using Fisher-Yates algorithm
+			set remainingCount to count of remainingIndices
+			repeat with i from remainingCount to 2 by -1
+				set j to (random number from 1 to i)
+				set temp to item i of remainingIndices
+				set item i of remainingIndices to item j of remainingIndices
+				set item j of remainingIndices to temp
+			end repeat
+			
+			-- Add the shuffled remaining tracks
+			repeat with shuffledIndex in remainingIndices
+				set sourceTrack to track shuffledIndex of sourcePlaylist
+				duplicate sourceTrack to queuePlaylist
+			end repeat
+			
+			return "SUCCESS: Created amtui Queue with selected song first, followed by " & (trackCount - 1) & " shuffled tracks from " & "%s"
+			
+		on error errMsg
+			error "Failed to create queue: " & errMsg
+	end try
+end tell
+	`, escapedSourcePlaylist, selectedPosition, selectedPosition, selectedPosition, selectedPosition, selectedPosition, escapedSourcePlaylist)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "Failed to create queue:") {
+		return fmt.Errorf("Queue creation failed: %s", output[23:]) // Remove "Failed to create queue: " prefix
+	}
+	
+	if !strings.HasPrefix(output, "SUCCESS:") {
+		return fmt.Errorf("unexpected AppleScript output: %s", output)
+	}
+	
+	return nil
+}
+
+// PlayQueuePlaylist plays the amtui Queue playlist and optionally creates it from a source playlist
+func (d *Daemon) PlayQueuePlaylist(sourcePlaylist string) error {
+	// First create/update the queue
+	if err := d.CreateOrUpdateQueue(sourcePlaylist); err != nil {
+		return fmt.Errorf("failed to create queue: %w", err)
+	}
+	
+	// Now play the queue playlist
+	script := `
+	tell application "Music"
+		if it is not running then
+			return "ERROR: Music app is not running"
+		end if
+		
+		try
+			set queuePlaylist to user playlist "amtui Queue"
+			play queuePlaylist
+			return "SUCCESS: Playing amtui Queue"
+			
+		on error errMsg
+			return "ERROR: " & errMsg
+		end try
+	end tell
+	`
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if !strings.HasPrefix(output, "SUCCESS:") {
+		return fmt.Errorf("unexpected AppleScript output: %s", output)
+	}
+	
+	return nil
+}
+
+// SkipToQueuePosition skips to a specific position (1-based) in the current queue
+func (d *Daemon) SkipToQueuePosition(position int) error {
+	script := fmt.Sprintf(`
+tell application "Music"
+	if it is not running then
+		return "ERROR: Music app is not running"
+	end if
+	
+	try
+		set currentQueue to current playlist
+		set trackCount to count of tracks of currentQueue
+		
+		if %d > trackCount then
+			return "ERROR: Position " & %d & " exceeds queue length of " & trackCount
+		end if
+		
+		if %d < 1 then
+			return "ERROR: Invalid position: " & %d
+		end if
+		
+		-- Get the target track at the specified position
+		set targetTrack to track %d of currentQueue
+		
+		-- Play the specific track
+		play targetTrack
+		
+		return "SUCCESS: Skipped to position " & %d & " in queue"
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`, position, position, position, position, position, position)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if !strings.HasPrefix(output, "SUCCESS:") {
+		return fmt.Errorf("unexpected AppleScript output: %s", output)
+	}
+	
+	return nil
+}
+
+// CleanupQueue removes tracks from the amtui Queue that have already been played
+// This keeps the queue showing only upcoming tracks
+func (d *Daemon) CleanupQueue() error {
+	script := `
+tell application "Music"
+	if it is not running then
+		return "ERROR: Music app is not running"
+	end if
+	
+	try
+		-- Check if we're currently playing from amtui Queue
+		set currentPlaylistName to name of current playlist
+		if currentPlaylistName is not "amtui Queue" then
+			return "INFO: Not playing from amtui Queue, no cleanup needed"
+		end if
+		
+		-- Get the amtui Queue playlist
+		set queuePlaylist to user playlist "amtui Queue"
+		set queueTracks to tracks of queuePlaylist
+		set totalTracks to count of queueTracks
+		
+		if totalTracks = 0 then
+			return "INFO: Queue is empty, no cleanup needed"
+		end if
+		
+		-- Get current track info
+		try
+			set currentTrack to current track
+			set currentTrackName to name of currentTrack
+			set currentTrackArtist to artist of currentTrack
+			
+			-- Find the position of current track in the queue
+			set currentTrackPosition to 0
+			repeat with i from 1 to totalTracks
+				set queueTrack to track i of queuePlaylist
+				if (name of queueTrack is currentTrackName) and (artist of queueTrack is currentTrackArtist) then
+					set currentTrackPosition to i
+					exit repeat
+				end if
+			end repeat
+			
+			-- If current track is found and it's not the first track, remove previous tracks
+			if currentTrackPosition > 1 then
+				set tracksToRemove to currentTrackPosition - 1
+				-- Remove tracks from the beginning (tracks 1 through currentTrackPosition-1)
+				repeat with i from 1 to tracksToRemove
+					delete track 1 of queuePlaylist -- Always delete track 1 as indices shift
+				end repeat
+				return "SUCCESS: Removed " & tracksToRemove & " completed tracks from queue"
+			else
+				return "INFO: Current track is first in queue, no cleanup needed"
+			end if
+			
+		on error trackErr
+			return "INFO: No current track playing, no cleanup needed"
+		end try
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	// INFO and SUCCESS messages are not errors
+	if strings.HasPrefix(output, "INFO:") || strings.HasPrefix(output, "SUCCESS:") {
+		return nil
+	}
+	
+	return fmt.Errorf("unexpected AppleScript output: %s", output)
 }
 
 func (d *Daemon) AddToQueue(track Track) error {

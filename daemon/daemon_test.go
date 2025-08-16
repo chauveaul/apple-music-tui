@@ -415,10 +415,10 @@ func TestTrackParsing(t *testing.T) {
 			name:  "valid track data",
 			input: "Song Name||Artist Name||Album Name||180",
 			expected: Track{
-				trackName:     "Song Name",
-				trackArtist:   "Artist Name",
-				trackAlbum:    "Album Name",
-				trackDuration: "180",
+				Name:     "Song Name",
+				Artist:   "Artist Name",
+				Album:    "Album Name",
+				Duration: "180",
 			},
 			wantErr: false,
 		},
@@ -440,10 +440,10 @@ func TestTrackParsing(t *testing.T) {
 				return
 			}
 			track := Track{
-				trackName:     parts[0],
-				trackArtist:   parts[1],
-				trackAlbum:    parts[2],
-				trackDuration: parts[3],
+				Name:     parts[0],
+				Artist:   parts[1],
+				Album:    parts[2],
+				Duration: parts[3],
 			}
 			if !reflect.DeepEqual(track, tt.expected) {
 				t.Errorf("Track parsing got %v, want %v", track, tt.expected)
@@ -461,12 +461,12 @@ func TestDaemon_PlayPlaylist(t *testing.T) {
 		{
 			name: "play playlist",
 			playlist: Playlist{
-				name: "My Playlist",
-				tracks: []Track{{
-					trackName:     "Test Song",
-					trackArtist:   "Test Artist",
-					trackAlbum:    "Test Album",
-					trackDuration: "180",
+				Name: "My Playlist",
+				Tracks: []Track{{
+					Name:     "Test Song",
+					Artist:   "Test Artist",
+					Album:    "Test Album",
+					Duration: "180",
 				}},
 			},
 			wantErr: false,
@@ -474,8 +474,8 @@ func TestDaemon_PlayPlaylist(t *testing.T) {
 		{
 			name: "play empty playlist",
 			playlist: Playlist{
-				name:   "",
-				tracks: []Track{},
+				Name:   "",
+				Tracks: []Track{},
 			},
 			wantErr: true, // Script will still execute
 		},
@@ -501,14 +501,14 @@ func TestDaemon_AddsSongToPlaylist(t *testing.T) {
 		{
 			name: "add song to playlist",
 			song: Track{
-				trackName:     "Landed In Brooklyn",
-				trackArtist:   "Khantrast",
-				trackAlbum:    "Landed In Brooklyn - Single",
-				trackDuration: "112",
+				Name:     "Landed In Brooklyn",
+				Artist:   "Khantrast",
+				Album:    "Landed In Brooklyn - Single",
+				Duration: "112",
 			},
 			playlist: Playlist{
-				name:   "My Playlist",
-				tracks: []Track{},
+				Name:   "My Playlist",
+				Tracks: []Track{},
 			},
 			wantErr: false,
 		},
@@ -534,14 +534,14 @@ func TestDaemon_RemoveSongFromPlaylist(t *testing.T) {
 		{
 			name: "remove song from playlist",
 			song: Track{
-				trackName:     "Landed In Brooklyn",
-				trackArtist:   "Khantrast",
-				trackAlbum:    "Landed In Brooklyn - Single",
-				trackDuration: "112",
+				Name:     "Landed In Brooklyn",
+				Artist:   "Khantrast",
+				Album:    "Landed In Brooklyn - Single",
+				Duration: "112",
 			},
 			playlist: Playlist{
-				name:   "My Playlist",
-				tracks: []Track{},
+				Name:   "My Playlist",
+				Tracks: []Track{},
 			},
 			wantErr: false,
 		},
@@ -623,7 +623,7 @@ func TestGetPlaylist(t *testing.T) {
 		{
 			name:    "existing playlist",
 			input:   "Straight good music",
-			want:    Playlist{name: "Straight good music", tracks: []Track{{trackName: "After Dark", trackArtist: "Mr.Kitty", trackAlbum: "Time", trackDuration: "259.147003173828"}}},
+			want:    Playlist{Name: "Straight good music", Tracks: []Track{{Name: "After Dark", Artist: "Mr.Kitty", Album: "Time", Duration: "259.147003173828"}}},
 			wantErr: false,
 		},
 		{
