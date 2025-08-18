@@ -494,7 +494,12 @@ func (d *Daemon) GetAllPlaylistNames() ([]string, error) {
 	if err != nil {
 		return []string{}, err
 	}
-	return strings.Split(strings.TrimSpace(string(out)), ", "), nil
+	output := strings.TrimSpace(string(out))
+	if output == "" {
+		return []string{}, nil
+	}
+	// AppleScript returns comma-separated list
+	return strings.Split(output, ", "), nil
 }
 
 func (d *Daemon) GetAllPlaylists() ([]Playlist, error) {
@@ -672,11 +677,14 @@ func (d *Daemon) CreateOrUpdateQueue(sourcePlaylist string) error {
 				end repeat
 			end if
 			
-			if isShuffled then
-				return "SUCCESS: Created shuffled amtui Queue with " & trackCount & " tracks from " & "%s"
-			else
-				return "SUCCESS: Created amtui Queue with " & trackCount & " tracks from " & "%s"
-			end if
+		-- Always disable shuffle after creating the queue so it plays in the intended order
+		set shuffle enabled to false
+		
+		if isShuffled then
+			return "SUCCESS: Created shuffled amtui Queue with " & trackCount & " tracks from " & "%s" & " (shuffle now disabled for playback)"
+		else
+			return "SUCCESS: Created amtui Queue with " & trackCount & " tracks from " & "%s" & " (shuffle disabled for queue playback)"
+		end if
 			
 		on error errMsg
 			error "Failed to create queue: " & errMsg
@@ -761,7 +769,10 @@ func (d *Daemon) CreateOrUpdateQueueWithSelectedFirst(sourcePlaylist string, sel
 				duplicate sourceTrack to queuePlaylist
 			end repeat
 			
-			return "SUCCESS: Created amtui Queue with selected song first, followed by " & (trackCount - 1) & " shuffled tracks from " & "%s"
+			-- Always disable shuffle after creating the queue so it plays in the intended order
+			set shuffle enabled to false
+			
+			return "SUCCESS: Created amtui Queue with selected song first, followed by " & (trackCount - 1) & " shuffled tracks from " & "%s" & " (shuffle disabled for queue playback)"
 			
 		on error errMsg
 			error "Failed to create queue: " & errMsg
@@ -960,15 +971,204 @@ end tell
 	return fmt.Errorf("unexpected AppleScript output: %s", output)
 }
 
-func (d *Daemon) AddToQueue(track Track) error {
-	// Build search criteria - we'll search by name and artist primarily
-	searchQuery := track.Name
-	if track.Artist != "" {
-		searchQuery += " " + track.Artist
+// PlayNext adds a track to play next using Apple Music's native Play Next functionality
+func (d *Daemon) PlayNext(track Track) error {
+	// Debug: Print track info being added
+	fmt.Printf("🔍 Adding Play Next: '%s' by '%s'\n", track.Name, track.Artist)
+	
+	// Escape quotes in track details
+	trackName := strings.ReplaceAll(track.Name, `"`, `\"`)
+	trackArtist := strings.ReplaceAll(track.Artist, `"`, `\"`)
+
+	script := fmt.Sprintf(`
+tell application "Music"
+	if it is not running then
+		error "Music app is not running"
+	end if
+	
+	try
+		-- Search for track by name first, then filter by artist
+		set foundTracks to (tracks whose name is "%s")
+		set targetTrack to missing value
+		
+		-- If we have an artist specified, try to find exact match
+		if "%s" is not "" then
+			repeat with candidateTrack in foundTracks
+				if artist of candidateTrack is "%s" then
+					set targetTrack to candidateTrack
+					exit repeat
+				end if
+			end repeat
+		end if
+		
+		-- If no exact artist match, take first track with matching name
+		if targetTrack is missing value and (count of foundTracks) > 0 then
+			set targetTrack to item 1 of foundTracks
+		end if
+		
+		if targetTrack is missing value then
+			error "Track '" & "%s" & "' not found in your library"
+		end if
+		
+		-- Use Apple Music's native "play next" functionality
+		-- This adds the track to Apple Music's Up Next queue right after current track
+		tell targetTrack to play next
+		
+		return "SUCCESS: Added " & (name of targetTrack) & " by " & (artist of targetTrack) & " to play next using native Apple Music queue"
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`, trackName, trackArtist, trackArtist, trackName)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
 	}
 
-	// Escape quotes in the search query and track details
-	searchQuery = strings.ReplaceAll(searchQuery, `"`, `\"`)
+	output := strings.TrimSpace(string(out))
+	
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if strings.HasPrefix(output, "SUCCESS:") {
+		fmt.Printf("✅ %s\n", output[9:]) // Remove "SUCCESS: " prefix and print
+		return nil
+	}
+
+	return fmt.Errorf("unexpected AppleScript output: %s", output)
+}
+
+// AddToQueueAtPosition adds a track to the amtui Queue at a specific position (1-based)
+// It recreates the entire queue with the new track inserted at the correct position
+func (d *Daemon) AddToQueueAtPosition(track Track, position int) error {
+	// Debug: Print track info being added
+	fmt.Printf("🔍 Attempting to add to queue at position %d: '%s' by '%s'\n", position, track.Name, track.Artist)
+	
+	// Escape quotes in track details
+	trackName := strings.ReplaceAll(track.Name, `"`, `\"`)
+	trackArtist := strings.ReplaceAll(track.Artist, `"`, `\"`)
+
+script := fmt.Sprintf(`
+tell application "Music"
+	if it is not running then
+		error "Music app is not running"
+	end if
+	
+	try
+		-- Search for track by name first, then filter by artist
+		set foundTracks to (tracks whose name is "%s")
+		set targetTrack to missing value
+		
+		-- If we have an artist specified, try to find exact match
+		if "%s" is not "" then
+			repeat with candidateTrack in foundTracks
+				if artist of candidateTrack is "%s" then
+					set targetTrack to candidateTrack
+					exit repeat
+				end if
+			end repeat
+		end if
+		
+		-- If no exact artist match, take first track with matching name
+		if targetTrack is missing value and (count of foundTracks) > 0 then
+			set targetTrack to item 1 of foundTracks
+		end if
+		
+		if targetTrack is missing value then
+			error "Track '" & "%s" & "' not found in your library"
+		end if
+		
+		-- Check if amtui Queue exists, create if it doesn't
+		try
+			set queuePlaylist to user playlist "amtui Queue"
+		on error
+			-- Create the playlist
+			set queuePlaylist to (make new user playlist with properties {name:"amtui Queue"})
+		end try
+		
+		-- Get current tracks in queue
+		set currentTracks to tracks of queuePlaylist
+		set queueTrackCount to count of currentTracks
+		
+		-- Validate position
+		if %d < 1 then
+			set insertPosition to 1
+		else if %d > queueTrackCount + 1 then
+			set insertPosition to queueTrackCount + 1
+		else
+			set insertPosition to %d
+		end if
+		
+		-- If queue is empty or inserting at end, just add normally
+		if queueTrackCount = 0 or insertPosition > queueTrackCount then
+			duplicate targetTrack to queuePlaylist
+			return "SUCCESS: Added track to position " & insertPosition & " (end of queue)"
+		end if
+		
+		-- Strategy: Rebuild the queue with the new track inserted
+		-- First, collect all current tracks with their info
+		set trackList to {}
+		repeat with i from 1 to queueTrackCount
+			set currentTrack to track i of queuePlaylist
+			set end of trackList to currentTrack
+		end repeat
+		
+		-- Clear the queue
+		delete tracks of queuePlaylist
+		
+		-- Rebuild queue with new track inserted at correct position
+		set trackIndex to 1
+		repeat with i from 1 to (queueTrackCount + 1)
+			if i = insertPosition then
+				-- Insert the new track at this position
+				duplicate targetTrack to queuePlaylist
+			else
+				-- Insert existing track
+				if trackIndex <= queueTrackCount then
+					set existingTrack to item trackIndex of trackList
+					duplicate existingTrack to queuePlaylist
+					set trackIndex to trackIndex + 1
+				end if
+			end if
+		end repeat
+		
+		set trackInfo to (name of targetTrack) & " by " & (artist of targetTrack)
+		return "SUCCESS: Added " & trackInfo & " to amtui Queue at position " & insertPosition
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`, trackName, trackArtist, trackArtist, trackName, position, position, position)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+
+	output := strings.TrimSpace(string(out))
+	
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if strings.HasPrefix(output, "SUCCESS:") {
+		fmt.Printf("✅ %s\n", output[9:]) // Remove "SUCCESS: " prefix and print
+		return nil
+	}
+
+	return fmt.Errorf("unexpected AppleScript output: %s", output)
+}
+
+// AddToQueue adds a track to the end of the amtui Queue
+func (d *Daemon) AddToQueue(track Track) error {
+	// Debug: Print track info being added
+	fmt.Printf("🔍 Attempting to add to queue: '%s' by '%s'\n", track.Name, track.Artist)
+	
+	// Escape quotes in track details
 	trackName := strings.ReplaceAll(track.Name, `"`, `\"`)
 	trackArtist := strings.ReplaceAll(track.Artist, `"`, `\"`)
 
@@ -979,16 +1179,30 @@ func (d *Daemon) AddToQueue(track Track) error {
 		end if
 		
 		try
-			-- Search your local library
-			set localTracks to (tracks whose name is "%s" and artist is "%s")
+			-- Search for track by name first, then filter by artist
+			set foundTracks to (tracks whose name is "%s")
+			set targetTrack to missing value
 			
-			if (count of localTracks) = 0 then
-				error "Track not found in your library"
+			-- If we have an artist specified, try to find exact match
+			if "%s" is not "" then
+				repeat with candidateTrack in foundTracks
+					if artist of candidateTrack is "%s" then
+						set targetTrack to candidateTrack
+						exit repeat
+					end if
+				end repeat
 			end if
 			
-			set targetTrack to item 1 of localTracks
+			-- If no exact artist match, take first track with matching name
+			if targetTrack is missing value and (count of foundTracks) > 0 then
+				set targetTrack to item 1 of foundTracks
+			end if
 			
-			-- Check if playlist exists, create if it doesn't
+			if targetTrack is missing value then
+				error "Track '" & "%s" & "' not found in your library"
+			end if
+			
+			-- Check if amtui Queue exists, create if it doesn't
 			try
 				set targetPlaylist to user playlist "amtui Queue"
 			on error
@@ -996,25 +1210,33 @@ func (d *Daemon) AddToQueue(track Track) error {
 				set targetPlaylist to (make new user playlist with properties {name:"amtui Queue"})
 			end try
 			
-			-- Add track using duplicate instead of add
+			-- Add track using duplicate
 			duplicate targetTrack to targetPlaylist
 			
-			return "Added: " & (name of targetTrack) & " by " & (artist of targetTrack) & " to amtui Queue"
+			set trackInfo to (name of targetTrack) & " by " & (artist of targetTrack)
+			return "SUCCESS: Added " & trackInfo & " to amtui Queue"
 			
 		on error errMsg
-			error "Failed to add track: " & errMsg
+			return "ERROR: " & errMsg
 		end try
 	end tell
-	`, trackName, trackArtist)
+	`, trackName, trackArtist, trackArtist, trackName)
+	
 	out, err := get_script_output(script)
 	if err != nil {
-		return fmt.Errorf("failed to add track to queue: %w", err)
+		return fmt.Errorf("AppleScript execution failed: %w", err)
 	}
 
-	if strings.HasPrefix(string(out), "Failed to add track:") {
-		return fmt.Errorf("Failed to add to queue with err %s", string(out))
+	output := strings.TrimSpace(string(out))
+	
+	if strings.HasPrefix(output, "ERROR:") {
+		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	if strings.HasPrefix(output, "SUCCESS:") {
+		fmt.Printf("✅ %s\n", output[9:]) // Remove "SUCCESS: " prefix and print
+		return nil
 	}
 
-	fmt.Printf("✅ %s\n", out)
-	return nil
+	return fmt.Errorf("unexpected AppleScript output: %s", output)
 }

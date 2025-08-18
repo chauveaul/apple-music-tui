@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -113,7 +114,7 @@ func (m searchHelpModel) View() string {
 				searchDisplay.WriteString("_")
 			}
 		}
-		
+
 		// Wrap in simple brackets to indicate input field
 		searchLine := "[" + searchDisplay.String() + "]"
 		lines = append(lines, searchLine)
@@ -180,14 +181,28 @@ type allPlaylistsMsg struct {
 }
 
 func fetchPlaylists() tea.Msg {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("PANIC in fetchPlaylists: %v\n", r)
+		}
+	}()
+
 	d := daemon.Daemon{}
 	playlists, err := d.GetAllPlaylistNames()
+	if err != nil {
+		fmt.Printf("Error in fetchPlaylists: %v\n", err)
+		return playlistsMsg{playlists: nil, err: err}
+	}
+
 	//Removing the queue that we made because it is not a user playlist
 	if slices.Index(playlists, "amtui Queue") != -1 {
 		playlists = slices.Delete(playlists, slices.Index(playlists, "amtui Queue"), slices.Index(playlists, "amtui Queue")+1)
 	}
 	//Taking the slice playlists[2:] to remove "Library" and "Music"
-	return playlistsMsg{playlists: playlists[2:], err: err}
+	if len(playlists) >= 2 {
+		playlists = playlists[2:]
+	}
+	return playlistsMsg{playlists: playlists, err: err}
 }
 
 // fetchAllPlaylists runs in a goroutine to fetch all playlist data with tracks
@@ -232,7 +247,7 @@ func (m playlistsModel) View() string {
 	// Use cached playlists if available, otherwise show error
 	playlistItems := m.playlistItems
 	if m.lastError != nil {
-		// Return truncated error message if needed
+		// Return simple error message
 		errorMsg := fmt.Sprintf("Error: %v", m.lastError)
 		if len(errorMsg) > m.width {
 			if m.width > 3 {
@@ -273,20 +288,20 @@ func (m playlistsModel) View() string {
 	// Add visible playlist items
 	for i := startIdx; i < endIdx; i++ {
 		item := playlistItems[i]
-		
+
 		// Calculate available space for the playlist name (accounting for prefix and ellipsis)
 		availableWidth := m.width - 2 // "  " or "> " prefix
 		if availableWidth < 1 {
 			availableWidth = 1
 		}
-		
+
 		// Truncate the item name first, before applying any styling
 		truncatedItem := item
 		if runewidth.StringWidth(item) > availableWidth {
 			// Reserve space for ellipsis
 			truncatedItem = runewidth.Truncate(item, availableWidth-3, "...")
 		}
-		
+
 		// Now apply styling only to the (possibly truncated) playlist name
 		var line string
 		if i == m.activeItem {
@@ -298,7 +313,7 @@ func (m playlistsModel) View() string {
 		} else {
 			line = "  " + truncatedItem
 		}
-		
+
 		allLines = append(allLines, line)
 	}
 
@@ -441,7 +456,7 @@ func (m mainContentModel) View() string {
 	// Calculate column widths based on available space
 	// Reserve space for left padding (1) + separators between columns (3 spaces)
 	durationWidth := 5 // Fixed 5 chars for duration (e.g., "3:45") - very conservative
-	
+
 	// Account for: left padding + 3 spaces between columns + duration width
 	// Subtract 8 characters for safety margin to prevent bubbleboxer errors
 	availableWidth := m.width - 1 - 3 - durationWidth - 8
@@ -480,7 +495,7 @@ func (m mainContentModel) View() string {
 			nameWidth = nameWidth - int(float64(nameWidth)*reduction)
 			artistWidth = artistWidth - int(float64(artistWidth)*reduction)
 			albumWidth = albumWidth - int(float64(albumWidth)*reduction)
-			
+
 			// Enforce absolute minimums
 			if nameWidth < 4 {
 				nameWidth = 4
@@ -998,13 +1013,13 @@ func getRandomAsciiArt() []string {
 
 // QueueModel represents the queue overlay
 type queueModel struct {
-	width, height    int
-	queueInfo        *daemon.QueueInfo
-	selectedItem     int
-	scrollOffset     int
-	visible          bool
-	loading          bool
-	lastError        error
+	width, height int
+	queueInfo     *daemon.QueueInfo
+	selectedItem  int
+	scrollOffset  int
+	visible       bool
+	loading       bool
+	lastError     error
 }
 
 // Message for queue info
@@ -1079,7 +1094,7 @@ func (m queueModel) View() string {
 		if row >= topPadding && row < topPadding+overlayHeight {
 			// This row contains overlay content
 			overlayRow := row - topPadding
-			
+
 			// Add left transparent padding
 			for col := 0; col < leftPadding; col++ {
 				content.WriteString(" ")
@@ -1098,26 +1113,26 @@ func (m queueModel) View() string {
 
 				// Add content based on line
 				contentLine := m.getContentLine(overlayRow-1, overlayWidth-2)
-				
+
 				// Use Unicode-aware width calculation for proper padding
 				contentWidth := runewidth.StringWidth(contentLine)
 				availableContentWidth := overlayWidth - 2 // Account for left and right borders
-				
+
 				// Truncate content if it's too wide
 				if contentWidth > availableContentWidth {
 					contentLine = runewidth.Truncate(contentLine, availableContentWidth, "")
 					contentWidth = availableContentWidth
 				}
-				
+
 				// Add the content
 				content.WriteString(contentLine)
-				
+
 				// Add padding to fill remaining space
 				padding := availableContentWidth - contentWidth
 				if padding > 0 {
 					content.WriteString(strings.Repeat(" ", padding))
 				}
-				
+
 				content.WriteString("│")
 			}
 
@@ -1179,7 +1194,7 @@ func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
 	// Current track info
 	if lineIndex == 2 {
 		if m.queueInfo.CurrentTrack != nil {
-			currentInfo := fmt.Sprintf(" ♪ Now Playing: %s - %s (Track %d)", 
+			currentInfo := fmt.Sprintf(" ♪ Now Playing: %s - %s (Track %d)",
 				m.queueInfo.CurrentTrack.Name, m.queueInfo.CurrentTrack.Artist, m.queueInfo.CurrentPosition)
 			if len(currentInfo) > maxWidth {
 				currentInfo = currentInfo[:maxWidth-3] + "..."
@@ -1218,7 +1233,7 @@ func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
 			if trackIndex < len(m.queueInfo.Tracks) {
 				track := m.queueInfo.Tracks[trackIndex]
 				prefix := "   "
-				
+
 				// Highlight selected item
 				if trackIndex == m.selectedItem {
 					prefix = " > "
@@ -1236,11 +1251,11 @@ func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
 			currentPosIndex := m.queueInfo.CurrentPosition - 1 // Convert to 0-based
 			upcomingTrackIndex := lineIndex - 7 + m.scrollOffset
 			actualTrackIndex := currentPosIndex + 1 + upcomingTrackIndex // +1 to skip current track
-			
+
 			if actualTrackIndex < len(m.queueInfo.Tracks) {
 				track := m.queueInfo.Tracks[actualTrackIndex]
 				prefix := "   "
-				
+
 				// Adjust selected item to work with upcoming tracks display (exclude current)
 				adjustedSelectedItem := m.selectedItem - currentPosIndex - 1 // -1 to account for skipped current track
 				if upcomingTrackIndex == adjustedSelectedItem {
@@ -1260,6 +1275,136 @@ func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
 	return ""
 }
 
+// Context menu options
+type contextMenuOption int
+
+const (
+	contextPlay contextMenuOption = iota
+	contextAddToQueue
+)
+
+// Context menu model
+type contextMenuModel struct {
+	width, height   int
+	visible         bool
+	selectedOption  int
+	x, y            int // Position of the context menu
+	targetSong      daemon.Track
+	targetPlaylist  string
+	targetSongIndex int
+}
+
+func (m contextMenuModel) Init() tea.Cmd { return nil }
+
+func (m contextMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+	return m, nil
+}
+
+func (m contextMenuModel) View() string {
+	if !m.visible {
+		return ""
+	}
+
+	// Calculate overlay dimensions (50% of screen width, auto height based on content)
+	overlayWidth := int(float64(m.width) * 0.5)
+	if overlayWidth < 40 {
+		overlayWidth = 40
+	}
+	if overlayWidth > 60 {
+		overlayWidth = 60 // Max width
+	}
+
+	// Calculate content height: song info (3 lines) + separator (1) + options (3) + borders (2) + spacing
+	overlayHeight := 10 // Fixed height for context menu
+
+	// Ensure overlay doesn't exceed terminal bounds
+	if overlayWidth > m.width {
+		overlayWidth = m.width
+	}
+	if overlayHeight > m.height {
+		overlayHeight = m.height
+	}
+
+	// Center the overlay
+	leftPadding := (m.width - overlayWidth) / 2
+	topPadding := (m.height - overlayHeight) / 2
+
+	// Create the full screen overlay with transparent background
+	var content strings.Builder
+
+	// Render each line of the full terminal
+	for row := 0; row < m.height; row++ {
+		if row > 0 {
+			content.WriteString("\n")
+		}
+
+		// Check if this row is within the overlay area
+		if row >= topPadding && row < topPadding+overlayHeight {
+			// This row contains overlay content
+			overlayRow := row - topPadding
+
+			// Add left transparent padding
+			for col := 0; col < leftPadding; col++ {
+				content.WriteString(" ")
+			}
+
+			// Add overlay content
+			if overlayRow == 0 {
+				// Top border
+				content.WriteString("┌" + strings.Repeat("─", overlayWidth-2) + "┐")
+			} else if overlayRow == overlayHeight-1 {
+				// Bottom border
+				content.WriteString("└" + strings.Repeat("─", overlayWidth-2) + "┘")
+			} else {
+				// Content area
+				content.WriteString("│")
+
+				// Add content based on line
+				contentLine := m.getContentLine(overlayRow-1, overlayWidth-2)
+
+				// Use Unicode-aware width calculation for proper padding
+				contentWidth := runewidth.StringWidth(contentLine)
+				availableContentWidth := overlayWidth - 2 // Account for left and right borders
+
+				// Truncate content if it's too wide
+				if contentWidth > availableContentWidth {
+					contentLine = runewidth.Truncate(contentLine, availableContentWidth, "...")
+					contentWidth = runewidth.StringWidth(contentLine)
+				}
+
+				// Add the content
+				content.WriteString(contentLine)
+
+				// Add padding to fill remaining space
+				padding := availableContentWidth - contentWidth
+				if padding > 0 {
+					content.WriteString(strings.Repeat(" ", padding))
+				}
+
+				content.WriteString("│")
+			}
+
+			// Add right transparent padding
+			rightPadding := m.width - leftPadding - overlayWidth
+			for col := 0; col < rightPadding; col++ {
+				content.WriteString(" ")
+			}
+		} else {
+			// This row is outside the overlay - make it transparent
+			for col := 0; col < m.width; col++ {
+				content.WriteString(" ")
+			}
+		}
+	}
+
+	return content.String()
+}
+
 // Model represents the application state using bubbleboxer
 type Model struct {
 	boxer                bubbleboxer.Boxer
@@ -1275,6 +1420,9 @@ type Model struct {
 	// Queue overlay
 	queueOverlay queueModel
 	queueVisible bool
+	// Context menu
+	contextMenu    contextMenuModel
+	contextVisible bool
 	// Track change detection for automatic queue cleanup
 	lastPlayingTrack string // Track ID of the last playing track to detect changes
 }
@@ -1553,7 +1701,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			fmt.Printf("\rTerminal size changed: %dx%d -> %dx%d\n", prevWidth, prevHeight, msg.Width, msg.Height)
 		}
 	case tea.KeyMsg:
-		// Handle queue overlay navigation first
+		// Handle context menu navigation first
+		if m.contextVisible {
+			switch msg.String() {
+			case "esc", "q":
+				// Close context menu
+				m.contextVisible = false
+				m.contextMenu.visible = false
+				return m, nil
+			case "up", "k":
+				// Navigate up in context menu
+				if m.contextMenu.selectedOption > 0 {
+					m.contextMenu.selectedOption--
+				}
+				return m, nil
+			case "down", "j":
+				// Navigate down in context menu
+				if m.contextMenu.selectedOption < 2 { // 3 options total (0-2)
+					m.contextMenu.selectedOption++
+				}
+				return m, nil
+			case "enter":
+				// Execute selected context menu option
+				return m, m.executeContextMenuAction()
+			default:
+				// Ignore other keys when context menu is visible
+				return m, nil
+			}
+		}
+
+		// Handle queue overlay navigation
 		if m.queueVisible {
 			switch msg.String() {
 			case "q", "esc":
@@ -1573,7 +1750,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.queueOverlay.queueInfo.CurrentPosition > 0 {
 						minPosition = m.queueOverlay.queueInfo.CurrentPosition // First upcoming track (0-based)
 					}
-					
+
 					if m.queueOverlay.selectedItem > minPosition {
 						m.queueOverlay.selectedItem--
 						// Update scroll offset if needed
@@ -1596,35 +1773,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
-				case "enter":
-					// Skip to selected song in queue
-					if m.queueOverlay.queueInfo != nil && len(m.queueOverlay.queueInfo.Tracks) > 0 {
-						// Use the selected item directly as the track index (0-based)
-						if m.queueOverlay.selectedItem >= 0 && m.queueOverlay.selectedItem < len(m.queueOverlay.queueInfo.Tracks) {
-							// Skip to the selected track using daemon (1-based indexing)
-							// When playing from queue, we want to disable shuffle to maintain queue order
-							d := daemon.Daemon{}
-							go func() {
-								// Temporarily disable shuffle for queue playback
-								currentShuffle, shuffleErr := d.GetShuffle()
-								if shuffleErr == nil && currentShuffle {
-									d.SetShuffle(false)
-								}
-								
-								err := d.SkipToQueuePosition(m.queueOverlay.selectedItem + 1) // Convert to 1-based
-								if err != nil {
-									fmt.Printf("Error skipping to track: %v\n", err)
-								}
-								
-								// Keep shuffle disabled for queue playback
-								// Don't restore it since we want the queue to play in order
-							}()
-							// Close overlay after action
-							m.queueVisible = false
-							m.queueOverlay.visible = false
-						}
+			case "enter":
+				// Skip to selected song in queue
+				if m.queueOverlay.queueInfo != nil && len(m.queueOverlay.queueInfo.Tracks) > 0 {
+					// Use the selected item directly as the track index (0-based)
+					if m.queueOverlay.selectedItem >= 0 && m.queueOverlay.selectedItem < len(m.queueOverlay.queueInfo.Tracks) {
+						// Skip to the selected track using daemon (1-based indexing)
+						// When playing from queue, we want to disable shuffle to maintain queue order
+						d := daemon.Daemon{}
+						go func() {
+							// Temporarily disable shuffle for queue playback
+							currentShuffle, shuffleErr := d.GetShuffle()
+							if shuffleErr == nil && currentShuffle {
+								d.SetShuffle(false)
+							}
+
+							err := d.SkipToQueuePosition(m.queueOverlay.selectedItem + 1) // Convert to 1-based
+							if err != nil {
+								fmt.Printf("Error skipping to track: %v\n", err)
+							}
+
+							// Keep shuffle disabled for queue playback
+							// Don't restore it since we want the queue to play in order
+						}()
+						// Close overlay after action
+						m.queueVisible = false
+						m.queueOverlay.visible = false
 					}
-					return m, nil
+				}
+				return m, nil
 			default:
 				// Ignore other keys when queue overlay is visible
 				return m, nil
@@ -1723,6 +1900,100 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "shift+k", "K":
+			// Show context menu for currently selected song (only in main focus)
+			if m.currentFocus == focusMain && m.selectedPlaylist != "" {
+				// Get the currently selected song info and calculate position
+				var selectedSong daemon.Track
+				var selectedSongIndex int
+				var menuX, menuY int
+
+				m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
+					main := model.(mainContentModel)
+					selectedSongIndex = main.selectedSong
+
+					// Calculate the position of the selected song row
+					// Main content area position calculation
+					// Get sidebar width from the boxer layout
+					var sidebarWidth int
+					if m.lastWidth <= 80 {
+						sidebarWidth = m.lastWidth / 3
+						if sidebarWidth < 25 {
+							sidebarWidth = 25
+						}
+					} else if m.lastWidth <= 120 {
+						sidebarWidth = 35
+					} else if m.lastWidth <= 160 {
+						sidebarWidth = 40
+					} else {
+						sidebarWidth = 45
+					}
+
+					// Calculate the Y position of the selected song
+					headerLines := 3 // title + header + separator
+					visibleSongRow := selectedSongIndex - main.scrollOffset
+					songRowY := headerLines + visibleSongRow
+
+					// Improved positioning logic
+					// First, calculate preferred position (to the right of song name)
+					preferredMenuX := sidebarWidth + 30 // Place further right, after song name column
+					preferredMenuY := songRowY + 1      // +1 for base style margin
+
+					// Menu dimensions (estimated)
+					menuWidth := 16 // Width needed for "Add To Queue" + borders
+					menuHeight := 5 // 3 options + 2 borders
+
+					// Check boundaries and adjust if needed
+					// X position: ensure menu doesn't go off right edge
+					if preferredMenuX+menuWidth > m.lastWidth {
+						// Try placing to the left of the song name instead
+						preferredMenuX = sidebarWidth - menuWidth - 2
+						// If that's still off-screen, place it at a safe position
+						if preferredMenuX < 0 {
+							preferredMenuX = 2 // Minimum padding from left edge
+						}
+					}
+
+					// Y position: ensure menu doesn't go off bottom edge
+					if preferredMenuY+menuHeight > m.lastHeight {
+						// Move menu up so it fits
+						preferredMenuY = m.lastHeight - menuHeight - 1
+						// Ensure it doesn't go above the top either
+						if preferredMenuY < 1 {
+							preferredMenuY = 1
+						}
+					}
+
+					menuX = preferredMenuX
+					menuY = preferredMenuY
+
+					return main, nil
+				})
+
+				// Get the song from the playlist cache
+				if playlist, exists := m.playlistCache[m.selectedPlaylist]; exists {
+					if selectedSongIndex >= 0 && selectedSongIndex < len(playlist.Tracks) {
+						selectedSong = playlist.Tracks[selectedSongIndex]
+
+						// Set up context menu
+						m.contextMenu.targetSong = selectedSong
+						m.contextMenu.targetPlaylist = m.selectedPlaylist
+						m.contextMenu.targetSongIndex = selectedSongIndex
+						m.contextMenu.selectedOption = 0 // Reset to first option
+						m.contextMenu.visible = true
+						m.contextMenu.width = m.lastWidth
+						m.contextMenu.height = m.lastHeight
+
+						// Position menu next to the selected song
+						m.contextMenu.x = menuX
+						m.contextMenu.y = menuY
+
+						m.contextVisible = true
+					}
+				}
+			}
+			return m, nil
+
 		case " ":
 			// Space key: toggle play/pause (works in any focus area except search)
 			if m.currentFocus != focusSearch {
@@ -1751,71 +2022,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-	case "r":
-		// R key: cycle repeat mode (works in any focus area except search)
-		if m.currentFocus != focusSearch {
-			d := daemon.Daemon{}
-			go func() {
-				err := d.CycleRepeatMode()
-				if err != nil {
-					// Could add error handling here, maybe show in UI
-					fmt.Printf("Error cycling repeat mode: %v\n", err)
-				}
-			}()
-			return m, nil
-		}
+		case "r":
+			// R key: cycle repeat mode (works in any focus area except search)
+			if m.currentFocus != focusSearch {
+				d := daemon.Daemon{}
+				go func() {
+					err := d.CycleRepeatMode()
+					if err != nil {
+						// Could add error handling here, maybe show in UI
+						fmt.Printf("Error cycling repeat mode: %v\n", err)
+					}
+				}()
+				return m, nil
+			}
 
-	case "+", "=":
-		// + key: volume up (works in any focus area except search)
-		if m.currentFocus != focusSearch {
-			d := daemon.Daemon{}
-			go func() {
-				// Get current volume first
-				currentVol, err := d.GetVolume()
-				if err != nil {
-					fmt.Printf("Error getting volume: %v\n", err)
-					return
-				}
-				
-				// Increase by 10%, max at 100
-				newVol := currentVol + 10
-				if newVol > 100 {
-					newVol = 100
-				}
-				
-				err = d.SetVolume(newVol)
-				if err != nil {
-					fmt.Printf("Error setting volume: %v\n", err)
-				}
-			}()
-			return m, nil
-		}
+		case "+", "=":
+			// + key: volume up (works in any focus area except search)
+			if m.currentFocus != focusSearch {
+				d := daemon.Daemon{}
+				go func() {
+					// Get current volume first
+					currentVol, err := d.GetVolume()
+					if err != nil {
+						fmt.Printf("Error getting volume: %v\n", err)
+						return
+					}
 
-	case "-":
-		// - key: volume down (works in any focus area except search)
-		if m.currentFocus != focusSearch {
-			d := daemon.Daemon{}
-			go func() {
-				// Get current volume first
-				currentVol, err := d.GetVolume()
-				if err != nil {
-					fmt.Printf("Error getting volume: %v\n", err)
-					return
-				}
-				
-				// Decrease by 10%, min at 0
-				newVol := currentVol - 10
-				if newVol < 0 {
-					newVol = 0
-				}
-				
-				err = d.SetVolume(newVol)
-				if err != nil {
-					fmt.Printf("Error setting volume: %v\n", err)
-				}
-			}()
-			return m, nil
-		}
+					// Increase by 10%, max at 100
+					newVol := currentVol + 10
+					if newVol > 100 {
+						newVol = 100
+					}
+
+					err = d.SetVolume(newVol)
+					if err != nil {
+						fmt.Printf("Error setting volume: %v\n", err)
+					}
+				}()
+				return m, nil
+			}
+
+		case "-":
+			// - key: volume down (works in any focus area except search)
+			if m.currentFocus != focusSearch {
+				d := daemon.Daemon{}
+				go func() {
+					// Get current volume first
+					currentVol, err := d.GetVolume()
+					if err != nil {
+						fmt.Printf("Error getting volume: %v\n", err)
+						return
+					}
+
+					// Decrease by 10%, min at 0
+					newVol := currentVol - 10
+					if newVol < 0 {
+						newVol = 0
+					}
+
+					err = d.SetVolume(newVol)
+					if err != nil {
+						fmt.Printf("Error setting volume: %v\n", err)
+					}
+				}()
+				return m, nil
+			}
 
 		case "enter":
 			if m.currentFocus == focusPlaylists {
@@ -2014,6 +2285,46 @@ func (m *Model) updateSongSelection(direction int) {
 	})
 }
 
+// executeContextMenuAction executes the selected context menu action
+func (m *Model) executeContextMenuAction() tea.Cmd {
+	// Close context menu first
+	m.contextVisible = false
+	m.contextMenu.visible = false
+
+	// Execute the selected action
+	switch contextMenuOption(m.contextMenu.selectedOption) {
+	case contextPlay:
+		// Play: Clear queue and play the selected song
+		return func() tea.Msg {
+			d := daemon.Daemon{}
+			go func() {
+				err := d.PlaySongAtPosition(m.contextMenu.targetPlaylist, m.contextMenu.targetSongIndex+1)
+				if err != nil {
+					fmt.Printf("Error playing song: %v\n", err)
+				}
+			}()
+			return nil
+		}
+	case contextAddToQueue:
+		// Add To Queue: Append to end of queue
+		return func() tea.Msg {
+			d := daemon.Daemon{}
+			go func() {
+				err := d.AddToQueue(m.contextMenu.targetSong)
+				if err != nil {
+					fmt.Printf("Error adding song to queue: %v\n", err)
+				} else {
+					fmt.Printf("✅ Added '%s' by %s to queue\n",
+						m.contextMenu.targetSong.Name, m.contextMenu.targetSong.Artist)
+				}
+			}()
+			return nil
+		}
+	default:
+		return nil
+	}
+}
+
 func (m Model) View() string {
 	// Create a temporary model to update focus state
 	tempModel := m
@@ -2035,13 +2346,104 @@ func (m Model) View() string {
 		}
 	}
 
+	// If context menu is visible, render it on top of existing content
+	if m.contextVisible {
+		// Update the context menu dimensions to match current terminal size
+		m.contextMenu.width = m.lastWidth
+		m.contextMenu.height = m.lastHeight
+		// Render the context menu overlay on top of the base view
+		contextMenuView := m.contextMenu.View()
+		if contextMenuView != "" {
+			// The context menu should completely cover the base view
+			return contextMenuView
+		}
+	}
+
 	// Use bubbleboxer to render the layout
 	return baseStyle.Render(baseView)
 }
 
+
+// getContentLine returns the content for a specific line in the context menu
+func (m contextMenuModel) getContentLine(lineIndex int, maxWidth int) string {
+	// Song information section
+	if lineIndex == 0 {
+		// Song title
+		songTitle := fmt.Sprintf(" 🎵 %s", m.targetSong.Name)
+		if len(songTitle) > maxWidth {
+			songTitle = songTitle[:maxWidth-3] + "..."
+		}
+		return songTitle
+	}
+	if lineIndex == 1 {
+		// Artist
+		artistLine := fmt.Sprintf(" 🎤 %s", m.targetSong.Artist)
+		if len(artistLine) > maxWidth {
+			artistLine = artistLine[:maxWidth-3] + "..."
+		}
+		return artistLine
+	}
+	if lineIndex == 2 {
+		// Album
+		albumLine := fmt.Sprintf(" 💿 %s", m.targetSong.Album)
+		if len(albumLine) > maxWidth {
+			albumLine = albumLine[:maxWidth-3] + "..."
+		}
+		return albumLine
+	}
+	if lineIndex == 3 {
+		// Separator
+		return " " + strings.Repeat("─", maxWidth-2)
+	}
+	if lineIndex == 4 {
+		// Empty line for spacing
+		return ""
+	}
+
+	// Options section
+	options := []string{"Play", "Add To Queue"}
+	optionIndex := lineIndex - 5 // Offset for song info + separator + spacing
+
+	if optionIndex >= 0 && optionIndex < len(options) {
+		var prefix string
+		if optionIndex == m.selectedOption {
+			prefix = " ► " // Use arrow for selection
+		} else {
+			prefix = "   " // Three spaces for alignment
+		}
+
+		return prefix + options[optionIndex]
+	}
+
+	// Empty line
+	return ""
+}
+
 // Run starts the TUI application
 func Run() error {
-	p := tea.NewProgram(NewModel(), tea.WithAltScreen())
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("PANIC in TUI: %v\n", r)
+			// You can add stack trace here if needed
+			// debug.PrintStack()
+			os.Exit(1)
+		}
+	}()
+
+	fmt.Println("Starting TUI application...")
+
+	// Create model with error handling
+	model := NewModel()
+	fmt.Println("Model created successfully")
+
+	// Initialize program
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	fmt.Println("Program initialized successfully")
+
+	// Run program
 	_, err := p.Run()
+	if err != nil {
+		fmt.Printf("Program run error: %v\n", err)
+	}
 	return err
 }
