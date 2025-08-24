@@ -353,6 +353,10 @@ type mainContentModel struct {
 	// Song selection state
 	selectedSong int
 	scrollOffset int
+	// Search results
+	searchResults []daemon.Track
+	searchQuery   string
+	isSearchMode  bool
 }
 
 func (m mainContentModel) Init() tea.Cmd { return nil }
@@ -368,6 +372,11 @@ func (m mainContentModel) View() string {
 	// Ensure we have valid dimensions
 	if m.height <= 0 || m.width <= 0 {
 		return ""
+	}
+
+	// If in search mode, show search results
+	if m.isSearchMode {
+		return m.renderSearchResults()
 	}
 
 	// If no playlist is selected, show ASCII art
@@ -600,6 +609,166 @@ func (m mainContentModel) View() string {
 	lines := strings.Split(result, "\n")
 	if len(lines) > m.height {
 		// Truncate to fit within height constraint
+		lines = lines[:m.height]
+		result = strings.Join(lines, "\n")
+	}
+
+	return result
+}
+
+// renderSearchResults renders the search results in table format
+func (m mainContentModel) renderSearchResults() string {
+	// Build the table for search results
+	var content strings.Builder
+
+	// Add title
+	title := fmt.Sprintf("Search Results for: \"%s\"", m.searchQuery)
+	content.WriteString(" " + titleStyle.Render(title) + "\n")
+
+	if len(m.searchResults) == 0 {
+		content.WriteString("\n No results found.")
+		return content.String()
+	}
+
+	// Calculate column widths - same logic as playlist view
+	durationWidth := 5
+	availableWidth := m.width - 1 - 3 - durationWidth - 8
+	if availableWidth < 10 {
+		availableWidth = 10
+	}
+
+	nameWidth := availableWidth * 40 / 100
+	artistWidth := availableWidth * 30 / 100
+	albumWidth := availableWidth * 30 / 100
+
+	// Ensure minimum widths
+	minNameWidth := 8
+	minArtistWidth := 6
+	minAlbumWidth := 6
+
+	if nameWidth < minNameWidth {
+		nameWidth = minNameWidth
+	}
+	if artistWidth < minArtistWidth {
+		artistWidth = minArtistWidth
+	}
+	if albumWidth < minAlbumWidth {
+		albumWidth = minAlbumWidth
+	}
+
+	// Final check: ensure total doesn't exceed available space
+	totalNeeded := 1 + nameWidth + 1 + artistWidth + 1 + albumWidth + 1 + durationWidth
+	if totalNeeded > m.width {
+		excess := totalNeeded - m.width
+		flexibleTotal := nameWidth + artistWidth + albumWidth
+		if flexibleTotal > excess {
+			reduction := float64(excess) / float64(flexibleTotal)
+			nameWidth = nameWidth - int(float64(nameWidth)*reduction)
+			artistWidth = artistWidth - int(float64(artistWidth)*reduction)
+			albumWidth = albumWidth - int(float64(albumWidth)*reduction)
+
+			if nameWidth < 4 {
+				nameWidth = 4
+			}
+			if artistWidth < 4 {
+				artistWidth = 4
+			}
+			if albumWidth < 4 {
+				albumWidth = 4
+			}
+		}
+	}
+
+	// Table header
+	header := fmt.Sprintf(" %-*s %-*s %-*s %*s",
+		nameWidth, "Name",
+		artistWidth, "Artist",
+		albumWidth, "Album",
+		durationWidth, "Duration")
+	content.WriteString(header + "\n")
+
+	// Add a separator line
+	separator := strings.Repeat("─", m.width-2)
+	content.WriteString(" " + separator + "\n")
+
+	// Calculate visible tracks
+	headerLines := 3 // title + header + separator
+	visibleTracks := m.height - headerLines
+	if visibleTracks < 1 {
+		visibleTracks = 1
+	}
+
+	// Handle scrolling
+	startIdx := m.scrollOffset
+	endIdx := startIdx + visibleTracks
+	if endIdx > len(m.searchResults) {
+		endIdx = len(m.searchResults)
+	}
+
+	// Add track rows
+	for i := startIdx; i < endIdx; i++ {
+		track := m.searchResults[i]
+
+		// Format duration
+		durationStr := "0:00"
+		if track.Duration != "" {
+			var seconds float64
+			if n, err := fmt.Sscanf(track.Duration, "%f", &seconds); err == nil && n > 0 {
+				minutes := int(seconds) / 60
+				secs := int(seconds) % 60
+				durationStr = fmt.Sprintf("%d:%02d", minutes, secs)
+			} else {
+				durationStr = "0:00"
+			}
+		}
+
+		// Truncate fields to fit in their columns
+		name := track.Name
+		if runewidth.StringWidth(name) > nameWidth {
+			name = runewidth.Truncate(name, nameWidth, "...")
+		}
+
+		artist := track.Artist
+		if runewidth.StringWidth(artist) > artistWidth {
+			artist = runewidth.Truncate(artist, artistWidth, "...")
+		}
+
+		album := track.Album
+		if runewidth.StringWidth(album) > albumWidth {
+			album = runewidth.Truncate(album, albumWidth, "...")
+		}
+
+		// Format the row
+		row := fmt.Sprintf(" %s %s %s %s",
+			padRight(name, nameWidth),
+			padRight(artist, artistWidth),
+			padRight(album, albumWidth),
+			padLeft(durationStr, durationWidth))
+
+		// Apply selection styling if this row is selected and main content is focused
+		if i == m.selectedSong && m.focused {
+			row = selectedSongStyle.Render(row)
+		}
+
+		// Final safety check
+		if len(row) > m.width {
+			row = row[:m.width-1]
+		}
+
+		content.WriteString(row + "\n")
+	}
+
+	// Add scroll indicator if needed
+	totalLinesUsed := headerLines + (endIdx - startIdx)
+	if len(m.searchResults) > visibleTracks && totalLinesUsed < m.height-1 {
+		scrollInfo := fmt.Sprintf(" [%d/%d results]", m.selectedSong+1, len(m.searchResults))
+		content.WriteString("\n" + scrollInfo)
+	}
+
+	// Ensure we don't exceed height limit
+	result := content.String()
+	lines := strings.Split(result, "\n")
+	if len(lines) > m.height {
 		lines = lines[:m.height]
 		result = strings.Join(lines, "\n")
 	}
@@ -1028,12 +1197,28 @@ type queueInfoMsg struct {
 	err  error
 }
 
+// Message for search results
+type searchResultsMsg struct {
+	tracks []daemon.Track
+	query  string
+	err    error
+}
+
 // fetchQueueInfo gets the current queue information
 func fetchQueueInfo() tea.Cmd {
 	return func() tea.Msg {
 		d := daemon.Daemon{}
 		info, err := d.GetQueueInfo()
 		return queueInfoMsg{info: info, err: err}
+	}
+}
+
+// fetchSearchResults searches for tracks by query
+func fetchSearchResults(query string) tea.Cmd {
+	return func() tea.Msg {
+		d := daemon.Daemon{}
+		tracks, err := d.SearchTracks(query)
+		return searchResultsMsg{tracks: tracks, query: query, err: err}
 	}
 }
 
@@ -1673,6 +1858,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update dimensions based on current terminal size
 		m.queueOverlay.width = m.lastWidth
 		m.queueOverlay.height = m.lastHeight
+	case searchResultsMsg:
+		// Handle search results
+		m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
+			main := model.(mainContentModel)
+			if msg.err != nil {
+				// Error occurred during search - show empty results with error message
+				main.searchResults = []daemon.Track{}
+				main.searchQuery = fmt.Sprintf("Error: %v", msg.err)
+				main.isSearchMode = true // Still show search mode to display the error
+				main.selectedSong = 0
+				main.scrollOffset = 0
+			} else {
+				// Update search results
+				main.searchResults = msg.tracks
+				main.searchQuery = msg.query
+				main.isSearchMode = true
+				main.selectedSong = 0 // Reset selection to first result
+				main.scrollOffset = 0 // Reset scroll position
+			}
+			return main, nil
+		})
+		// Switch focus to main content to show search results or error
+		m.currentFocus = focusMain
+		m.updateFocus()
 	case sizeCheckMsg:
 		// Aggressive size check for yabai compatibility
 		// Force immediate refresh to catch size changes
@@ -1828,10 +2037,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentFocus == focusSearch {
 			switch msg.String() {
 			case "enter":
-				// TODO: Implement search filtering
-				m.currentFocus = focusPlaylists
-				m.updateFocus()
-				return m, nil
+				// Get search text and perform search
+				var searchQuery string
+				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
+					sh := model.(searchHelpModel)
+					searchQuery = strings.TrimSpace(sh.searchText)
+					return sh, nil
+				})
+
+				// Only perform search if there's a query
+				if searchQuery != "" {
+					// Trigger search
+					return m, fetchSearchResults(searchQuery)
+				} else {
+					// Empty search - exit search mode
+					m.currentFocus = focusPlaylists
+					m.updateFocus()
+					return m, nil
+				}
 			case "esc":
 				// Clear search and return to playlists
 				m.boxer.EditLeaf("searchHelp", func(model tea.Model) (tea.Model, error) {
@@ -2105,22 +2328,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					main.currentPlaylist = m.selectedPlaylist
 					main.selectedSong = 0 // Reset to first song
 					main.scrollOffset = 0 // Reset scroll position
+					main.isSearchMode = false // Exit search mode when viewing playlist
 					return main, nil
 				})
 				// Automatically switch focus to main content for better UX
 				m.currentFocus = focusMain
 				m.updateFocus()
 			} else if m.currentFocus == focusMain {
-				// Play the selected song
-				if m.selectedPlaylist != "" {
-					var selectedSongIndex int
-					m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
-						main := model.(mainContentModel)
-						selectedSongIndex = main.selectedSong
-						return main, nil
-					})
-
-					// Play song at position (1-based indexing for AppleScript)
+				// Check if we're in search mode or playlist mode
+				var isSearchMode bool
+				var selectedTrack daemon.Track
+				var selectedSongIndex int
+				
+				m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
+					main := model.(mainContentModel)
+					isSearchMode = main.isSearchMode
+					selectedSongIndex = main.selectedSong
+					
+					if isSearchMode && len(main.searchResults) > 0 {
+						// Play selected search result
+						if selectedSongIndex >= 0 && selectedSongIndex < len(main.searchResults) {
+							selectedTrack = main.searchResults[selectedSongIndex]
+						}
+					}
+					return main, nil
+				})
+				
+				if isSearchMode {
+					// Play the selected search result directly
+					if selectedTrack.Name != "" {
+						d := daemon.Daemon{}
+						go func() {
+							// Use PlaySongById if we have an ID, otherwise try by name/artist
+							if selectedTrack.Id != "" {
+								err := d.PlaySongById(selectedTrack.Id)
+								if err != nil {
+									fmt.Printf("Error playing song by ID: %v\n", err)
+								}
+							} else {
+								// Fallback: try to find and play by name/artist
+								fmt.Printf("Playing search result: %s by %s\n", selectedTrack.Name, selectedTrack.Artist)
+								// Could implement additional logic here if needed
+							}
+						}()
+					}
+				} else if m.selectedPlaylist != "" {
+					// Play song from playlist (original logic)
 					d := daemon.Daemon{}
 					go func() {
 						err := d.PlaySongAtPosition(m.selectedPlaylist, selectedSongIndex+1)
@@ -2236,20 +2489,70 @@ func (m *Model) updatePlaylistSelection() {
 }
 
 func (m *Model) updateSongSelection(direction int) {
-	// Only proceed if we have a selected playlist
+	// Get the current main content model to check if we're in search mode
+	var isSearchMode bool
+	var searchResultCount int
+	var playlistSongCount int
+	
+	m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
+		main := model.(mainContentModel)
+		isSearchMode = main.isSearchMode
+		searchResultCount = len(main.searchResults)
+		return main, nil
+	})
+
+	if isSearchMode {
+		// Handle navigation in search results
+		if searchResultCount == 0 {
+			return // No search results to navigate
+		}
+		
+		m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
+			main := model.(mainContentModel)
+			
+			// Update selected song in search results
+			newSelection := main.selectedSong + direction
+			if newSelection < 0 {
+				newSelection = 0
+			} else if newSelection >= searchResultCount {
+				newSelection = searchResultCount - 1
+			}
+			main.selectedSong = newSelection
+			
+			// Calculate visible tracks and update scroll offset for search results
+			headerLines := 3 // title + header + separator
+			visibleTracks := main.height - headerLines
+			if visibleTracks < 1 {
+				visibleTracks = 1
+			}
+			
+			// Update scroll offset if needed
+			if main.selectedSong < main.scrollOffset {
+				// Song is above visible area, scroll up
+				main.scrollOffset = main.selectedSong
+			} else if main.selectedSong >= main.scrollOffset+visibleTracks {
+				// Song is below visible area, scroll down
+				main.scrollOffset = main.selectedSong - visibleTracks + 1
+			}
+			
+			return main, nil
+		})
+		return
+	}
+
+	// Handle navigation in playlist mode (original logic)
 	if m.selectedPlaylist == "" {
 		return
 	}
 
 	// Get the current song count from cache
-	var songCount int
 	if playlist, exists := m.playlistCache[m.selectedPlaylist]; exists {
-		songCount = len(playlist.Tracks)
+		playlistSongCount = len(playlist.Tracks)
 	} else {
 		return // No tracks available
 	}
 
-	if songCount == 0 {
+	if playlistSongCount == 0 {
 		return
 	}
 
@@ -2260,8 +2563,8 @@ func (m *Model) updateSongSelection(direction int) {
 		newSelection := main.selectedSong + direction
 		if newSelection < 0 {
 			newSelection = 0
-		} else if newSelection >= songCount {
-			newSelection = songCount - 1
+		} else if newSelection >= playlistSongCount {
+			newSelection = playlistSongCount - 1
 		}
 		main.selectedSong = newSelection
 

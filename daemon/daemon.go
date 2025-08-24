@@ -1240,3 +1240,137 @@ func (d *Daemon) AddToQueue(track Track) error {
 
 	return fmt.Errorf("unexpected AppleScript output: %s", output)
 }
+
+// SearchTracks searches for tracks in the Music library by name
+// Note: This searches your personal music library. To search the full Apple Music catalog,
+// you would need to add songs to your library first using the Music app.
+func (d *Daemon) SearchTracks(query string) ([]Track, error) {
+	// Validate and clean the search query
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []Track{}, nil
+	}
+	
+	// Escape special characters for AppleScript
+	escapedQuery := strings.ReplaceAll(query, `\`, `\\`) // Escape backslashes first
+	escapedQuery = strings.ReplaceAll(escapedQuery, `"`, `\"`) // Escape double quotes
+	escapedQuery = strings.ReplaceAll(escapedQuery, `'`, `\'`) // Escape single quotes
+	escapedQuery = strings.ReplaceAll(escapedQuery, "\n", " ") // Replace newlines with spaces
+	escapedQuery = strings.ReplaceAll(escapedQuery, "\r", " ") // Replace carriage returns
+	
+	// Limit query length to prevent issues
+	if len(escapedQuery) > 100 {
+		escapedQuery = escapedQuery[:100]
+	}
+	
+	script := fmt.Sprintf(`
+tell application "Music"
+	try
+		if it is not running then
+			return "ERROR: Music app is not running. Please open the Music app and try again."
+		end if
+		
+		-- Search for tracks that contain the query in their name
+		-- Use "contains" for partial matching instead of exact matching
+		set foundTracks to (tracks whose name contains "%s")
+		set trackCount to count of foundTracks
+		
+		if trackCount = 0 then
+			return "NO_RESULTS"
+		end if
+		
+		-- Limit results to prevent overwhelming output (max 50 tracks)
+		set maxResults to 50
+		if trackCount > maxResults then
+			set trackCount to maxResults
+		end if
+		
+		set resultString to ""
+		set validTracks to 0
+		
+		repeat with i from 1 to trackCount
+			set currentTrack to item i of foundTracks
+			
+			try
+				set trackName to name of currentTrack
+				set trackArtist to artist of currentTrack
+				set trackAlbum to album of currentTrack
+				set trackDuration to duration of currentTrack
+				set trackId to persistent ID of currentTrack
+				
+				-- Only include tracks with valid data
+				if trackName is not missing value and trackArtist is not missing value then
+					-- Clean up any problematic characters in track data
+					if trackAlbum is missing value then set trackAlbum to "Unknown Album"
+					if trackDuration is missing value then set trackDuration to 0
+					
+					-- Format: trackId~trackName~trackArtist~trackAlbum~trackDuration
+					set trackInfo to trackId & "~" & trackName & "~" & trackArtist & "~" & trackAlbum & "~" & trackDuration
+					
+					set validTracks to validTracks + 1
+					if validTracks = 1 then
+						set resultString to trackInfo
+					else
+						set resultString to resultString & "|" & trackInfo
+					end if
+				end if
+			on error
+				-- Skip tracks that cause errors (might be unavailable or corrupted)
+				-- AppleScript will automatically continue to next iteration
+			end try
+		end repeat
+		
+		if validTracks = 0 then
+			return "NO_RESULTS"
+		else
+			return resultString
+		end if
+		
+	on error errMsg
+		return "ERROR: " & errMsg
+	end try
+end tell
+	`, escapedQuery)
+	
+	out, err := get_script_output(script)
+	if err != nil {
+		return nil, fmt.Errorf("AppleScript execution failed: %w", err)
+	}
+	
+	output := strings.TrimSpace(string(out))
+	
+	if output == "NO_RESULTS" {
+		return []Track{}, nil // Return empty slice for no results
+	}
+	
+	if strings.HasPrefix(output, "ERROR:") {
+		return nil, fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	}
+	
+	// Parse the results
+	var tracks []Track
+	trackStrings := strings.Split(output, "|")
+	
+	for _, trackString := range trackStrings {
+		if trackString == "" {
+			continue
+		}
+		
+		parts := strings.Split(trackString, "~")
+		if len(parts) != 5 {
+			continue // Skip malformed entries
+		}
+		
+		track := Track{
+			Id:       parts[0],
+			Name:     parts[1],
+			Artist:   parts[2],
+			Album:    parts[3],
+			Duration: parts[4],
+		}
+		
+		tracks = append(tracks, track)
+	}
+	
+	return tracks, nil
+}
