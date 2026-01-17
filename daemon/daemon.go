@@ -116,9 +116,8 @@ func (d *Daemon) PlaySongInPlaylist(songName, playlistName string) error {
 }
 
 // PlaySongAtPosition plays a song at a specific position (1-based) in a playlist
-// and creates/updates the amtui Queue with all tracks from the playlist
 func (d *Daemon) PlaySongAtPosition(playlistName string, position int) error {
-	// Get the target song info before creating the queue
+	// Always validate position first
 	playlist, err := d.GetPlaylist(playlistName)
 	if err != nil {
 		return fmt.Errorf("failed to get playlist: %w", err)
@@ -126,52 +125,36 @@ func (d *Daemon) PlaySongAtPosition(playlistName string, position int) error {
 	if position < 1 || position > len(playlist.Tracks) {
 		return fmt.Errorf("invalid position %d for playlist with %d tracks", position, len(playlist.Tracks))
 	}
-	targetTrack := playlist.Tracks[position-1] // Convert to 0-based index
 	
-	// Create/update the queue with the selected song at the top, followed by shuffled remaining tracks
+	// Create queue with selected song first and remaining tracks (shuffled or in order)
 	if err := d.CreateOrUpdateQueueWithSelectedFirst(playlistName, position); err != nil {
 		return fmt.Errorf("failed to create queue from playlist: %w", err)
 	}
 	
-	// Now play the queue from the beginning (selected song is at position 1)
-	script := fmt.Sprintf(`
+	// Play the queue from the beginning
+	script := `
 tell application "Music"
 	if it is not running then
 		return "ERROR: Music app is not running"
 	end if
 	
 	try
-		-- Use the amtui Queue playlist
 		set targetPlaylist to user playlist "amtui Queue"
-		
-		-- Disable shuffle to maintain queue order
 		set shuffle enabled to false
-		
-		-- Play the queue from the beginning (selected song is now at position 1)
 		play targetPlaylist
-		
-		return "SUCCESS: Playing track \"" & "%s" & "\" from shuffled queue (source: %s)"
-		
+		return "SUCCESS"
 	on error errMsg
 		return "ERROR: " & errMsg
 	end try
-end tell
-	`, strings.ReplaceAll(targetTrack.Name, `"`, `\"`), playlistName)
+end tell`
 	
 	out, err := get_script_output(script)
 	if err != nil {
 		return fmt.Errorf("AppleScript execution failed: %w", err)
 	}
-	
-	output := strings.TrimSpace(string(out))
-	if strings.HasPrefix(output, "ERROR:") {
-		return fmt.Errorf("AppleScript error: %s", output[7:]) // Remove "ERROR: " prefix
+	if !strings.HasPrefix(strings.TrimSpace(string(out)), "SUCCESS") {
+		return fmt.Errorf("AppleScript error: %s", string(out))
 	}
-	
-	if !strings.HasPrefix(output, "SUCCESS:") {
-		return fmt.Errorf("unexpected AppleScript output: %s", output)
-	}
-	
 	return nil
 }
 
@@ -622,6 +605,12 @@ func (d *Daemon) CycleRepeatMode() error {
 // CreateOrUpdateQueue creates or updates the amtui Queue playlist with tracks from the specified playlist
 // If shuffle is enabled, it will shuffle the tracks before adding them to the queue
 func (d *Daemon) CreateOrUpdateQueue(sourcePlaylist string) error {
+	// First, get the current shuffle state from the daemon
+	currentShuffle, err := d.GetShuffle()
+	if err != nil {
+		return fmt.Errorf("failed to get shuffle state: %w", err)
+	}
+	
 	// Escape quotes in playlist name
 	escapedSourcePlaylist := strings.ReplaceAll(sourcePlaylist, `"`, `\"`)
 	
@@ -637,8 +626,8 @@ func (d *Daemon) CreateOrUpdateQueue(sourcePlaylist string) error {
 			set sourceTracks to tracks of sourcePlaylist
 			set trackCount to count of sourceTracks
 			
-			-- Check if shuffle is enabled
-			set isShuffled to shuffle enabled
+			-- Use the shuffle state passed from Go
+			set isShuffled to %v
 			
 			-- Check if amtui Queue exists, create if it doesn't
 			try
@@ -677,20 +666,20 @@ func (d *Daemon) CreateOrUpdateQueue(sourcePlaylist string) error {
 				end repeat
 			end if
 			
-		-- Always disable shuffle after creating the queue so it plays in the intended order
+		-- Disable shuffle for queue playback (queue is pre-ordered)
 		set shuffle enabled to false
 		
 		if isShuffled then
-			return "SUCCESS: Created shuffled amtui Queue with " & trackCount & " tracks from " & "%s" & " (shuffle now disabled for playback)"
+			return "SUCCESS: Created shuffled amtui Queue with " & trackCount & " tracks from " & "%s" & " (shuffle disabled for queue playback)"
 		else
-			return "SUCCESS: Created amtui Queue with " & trackCount & " tracks from " & "%s" & " (shuffle disabled for queue playback)"
+			return "SUCCESS: Created amtui Queue with " & trackCount & " tracks from " & "%s" & " in order (shuffle disabled for queue playback)"
 		end if
 			
 		on error errMsg
 			error "Failed to create queue: " & errMsg
 	end try
 end tell
-	`, escapedSourcePlaylist, escapedSourcePlaylist, escapedSourcePlaylist)
+	`, escapedSourcePlaylist, currentShuffle, escapedSourcePlaylist, escapedSourcePlaylist)
 	
 	out, err := get_script_output(script)
 	if err != nil {
@@ -709,8 +698,16 @@ end tell
 	return nil
 }
 
-// CreateOrUpdateQueueWithSelectedFirst creates a queue with the selected song first, followed by shuffled remaining tracks
+// CreateOrUpdateQueueWithSelectedFirst creates a queue starting from the selected position
+// If shuffle is enabled, selected song plays first followed by shuffled remaining tracks
+// If shuffle is disabled, plays from selected position to end in order
 func (d *Daemon) CreateOrUpdateQueueWithSelectedFirst(sourcePlaylist string, selectedPosition int) error {
+	// First, get the current shuffle state from the daemon
+	currentShuffle, err := d.GetShuffle()
+	if err != nil {
+		return fmt.Errorf("failed to get shuffle state: %w", err)
+	}
+	
 	// Escape quotes in playlist name
 	escapedSourcePlaylist := strings.ReplaceAll(sourcePlaylist, `"`, `\"`)
 	
@@ -733,6 +730,9 @@ func (d *Daemon) CreateOrUpdateQueueWithSelectedFirst(sourcePlaylist string, sel
 			-- Get the selected track
 			set selectedTrack to track %d of sourcePlaylist
 			
+			-- Use the shuffle state passed from Go
+			set isShuffled to %v
+			
 			-- Check if amtui Queue exists, create if it doesn't
 			try
 				set queuePlaylist to user playlist "amtui Queue"
@@ -746,39 +746,51 @@ func (d *Daemon) CreateOrUpdateQueueWithSelectedFirst(sourcePlaylist string, sel
 			-- First, add the selected track at the top
 			duplicate selectedTrack to queuePlaylist
 			
-			-- Create a list of remaining track indices (excluding the selected one)
-			set remainingIndices to {}
-			repeat with i from 1 to trackCount
-				if i is not %d then
-					set end of remainingIndices to i
-				end if
-			end repeat
+			if isShuffled then
+				-- When shuffle is ON: shuffle all remaining tracks (before and after selected)
+				set remainingIndices to {}
+				repeat with i from 1 to trackCount
+					if i is not %d then
+						set end of remainingIndices to i
+					end if
+				end repeat
+				
+				-- Shuffle the remaining indices using Fisher-Yates algorithm
+				set remainingCount to count of remainingIndices
+				repeat with i from remainingCount to 2 by -1
+					set j to (random number from 1 to i)
+					set temp to item i of remainingIndices
+					set item i of remainingIndices to item j of remainingIndices
+					set item j of remainingIndices to temp
+				end repeat
+				
+				-- Add the shuffled remaining tracks
+				repeat with trackIndex in remainingIndices
+					set sourceTrack to track trackIndex of sourcePlaylist
+					duplicate sourceTrack to queuePlaylist
+				end repeat
+			else
+				-- When shuffle is OFF: only add tracks from selected position to end
+				repeat with i from (%d + 1) to trackCount
+					set sourceTrack to track i of sourcePlaylist
+					duplicate sourceTrack to queuePlaylist
+				end repeat
+			end if
 			
-			-- Shuffle the remaining indices using Fisher-Yates algorithm
-			set remainingCount to count of remainingIndices
-			repeat with i from remainingCount to 2 by -1
-				set j to (random number from 1 to i)
-				set temp to item i of remainingIndices
-				set item i of remainingIndices to item j of remainingIndices
-				set item j of remainingIndices to temp
-			end repeat
-			
-			-- Add the shuffled remaining tracks
-			repeat with shuffledIndex in remainingIndices
-				set sourceTrack to track shuffledIndex of sourcePlaylist
-				duplicate sourceTrack to queuePlaylist
-			end repeat
-			
-			-- Always disable shuffle after creating the queue so it plays in the intended order
+			-- Disable shuffle for queue playback (queue is pre-ordered)
 			set shuffle enabled to false
 			
-			return "SUCCESS: Created amtui Queue with selected song first, followed by " & (trackCount - 1) & " shuffled tracks from " & "%s" & " (shuffle disabled for queue playback)"
+			if isShuffled then
+				return "SUCCESS: Created amtui Queue with selected song first, followed by " & (trackCount - 1) & " shuffled tracks from " & "%s" & " (shuffle disabled for queue playback)"
+			else
+				return "SUCCESS: Created amtui Queue with " & (count of tracks of queuePlaylist) & " tracks from " & "%s" & " in order (shuffle disabled for queue playback)"
+			end if
 			
 		on error errMsg
 			error "Failed to create queue: " & errMsg
 	end try
 end tell
-	`, escapedSourcePlaylist, selectedPosition, selectedPosition, selectedPosition, selectedPosition, selectedPosition, escapedSourcePlaylist)
+	`, escapedSourcePlaylist, selectedPosition, selectedPosition, selectedPosition, selectedPosition, currentShuffle, selectedPosition, selectedPosition, escapedSourcePlaylist, escapedSourcePlaylist)
 	
 	out, err := get_script_output(script)
 	if err != nil {
