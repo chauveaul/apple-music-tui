@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"main/daemon"
+	"main/lyrics"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1204,6 +1205,106 @@ type searchResultsMsg struct {
 	err    error
 }
 
+// LyricsModel represents the lyrics overlay
+type lyricsModel struct {
+	width, height   int
+	lyrics          string
+	syncedLyrics    string // LRC format with timestamps
+	parsedLyrics    []lrcLine
+	trackName       string
+	artistName      string
+	source          string // Which provider returned the lyrics
+	scrollOffset    int
+	currentLineIdx  int // Index of currently playing line
+	playbackPos     float64
+	visible         bool
+	loading         bool
+	lastError       error
+	autoScroll      bool // Whether to auto-scroll to current line
+}
+
+// lrcLine represents a single line of time-synced lyrics
+type lrcLine struct {
+	timestamp float64 // Timestamp in seconds
+	text      string
+}
+
+// Message for lyrics
+type lyricsMsg struct {
+	lyrics       string
+	syncedLyrics string
+	trackName    string
+	artist       string
+	source       string
+	err          error
+}
+
+// Message for playback position updates (for synced lyrics)
+type playbackPosMsg struct {
+	position float64
+}
+
+// Parse LRC format lyrics into structured lines
+func parseLRC(lrc string) []lrcLine {
+	if lrc == "" {
+		return nil
+	}
+
+	var lines []lrcLine
+	for _, line := range strings.Split(lrc, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// LRC format: [mm:ss.xx] text
+		if !strings.HasPrefix(line, "[") {
+			continue
+		}
+
+		endBracket := strings.Index(line, "]")
+		if endBracket == -1 {
+			continue
+		}
+
+		timeStr := line[1:endBracket]
+		text := strings.TrimSpace(line[endBracket+1:])
+
+		// Parse time format mm:ss.xx or mm:ss
+		parts := strings.Split(timeStr, ":")
+		if len(parts) != 2 {
+			continue
+		}
+
+		minutes := 0
+		fmt.Sscanf(parts[0], "%d", &minutes)
+
+		seconds := 0.0
+		fmt.Sscanf(parts[1], "%f", &seconds)
+
+		timestamp := float64(minutes)*60.0 + seconds
+
+		lines = append(lines, lrcLine{
+			timestamp: timestamp,
+			text:      text,
+		})
+	}
+
+	return lines
+}
+
+// Tick command for updating playback position
+func tickPlaybackPosition() tea.Cmd {
+	return tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+		d := daemon.Daemon{}
+		status, err := d.GetPlaybackStatus()
+		if err != nil {
+			return playbackPosMsg{position: 0}
+		}
+		return playbackPosMsg{position: status.Position}
+	})
+}
+
 // fetchQueueInfo gets the current queue information
 func fetchQueueInfo() tea.Cmd {
 	return func() tea.Msg {
@@ -1219,6 +1320,25 @@ func fetchSearchResults(query string) tea.Cmd {
 		d := daemon.Daemon{}
 		tracks, err := d.SearchTracks(query)
 		return searchResultsMsg{tracks: tracks, query: query, err: err}
+	}
+}
+
+// fetchLyrics gets lyrics for the current track
+func fetchLyrics(trackName, artistName string) tea.Cmd {
+	return func() tea.Msg {
+		client := lyrics.NewLyricsClient()
+		result, err := client.GetLyrics(trackName, artistName)
+		if err != nil {
+			return lyricsMsg{err: err, trackName: trackName, artist: artistName}
+		}
+		return lyricsMsg{
+			lyrics:       result.PlainLyrics,
+			syncedLyrics: result.SyncedLyrics,
+			trackName:    trackName,
+			artist:       artistName,
+			source:       result.Source,
+			err:          nil,
+		}
 	}
 }
 
@@ -1460,6 +1580,322 @@ func (m queueModel) getContentLine(lineIndex int, maxWidth int) string {
 	return ""
 }
 
+func (m lyricsModel) Init() tea.Cmd {
+	return nil
+}
+
+// stripANSI removes ANSI escape codes from a string for accurate width calculation
+func stripANSI(s string) string {
+	// Remove ANSI color codes (format: \033[...m)
+	var result strings.Builder
+	inEscape := false
+	
+	for i := 0; i < len(s); {
+		if i+1 < len(s) && s[i] == '\033' && s[i+1] == '[' {
+			// Start of ANSI escape sequence
+			inEscape = true
+			i += 2
+			continue
+		}
+		
+		if inEscape {
+			if s[i] == 'm' {
+				// End of ANSI escape sequence
+				inEscape = false
+			}
+			i++
+			continue
+		}
+		
+		result.WriteByte(s[i])
+		i++
+	}
+	
+	return result.String()
+}
+
+func (m lyricsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case lyricsMsg:
+		m.lyrics = msg.lyrics
+		m.syncedLyrics = msg.syncedLyrics
+		m.trackName = msg.trackName
+		m.artistName = msg.artist
+		m.source = msg.source
+		m.lastError = msg.err
+		m.loading = false
+		m.scrollOffset = 0
+		m.autoScroll = true
+		// Parse synced lyrics if available
+		if msg.syncedLyrics != "" {
+			m.parsedLyrics = parseLRC(msg.syncedLyrics)
+		}
+	case playbackPosMsg:
+		// Update playback position and find current line
+		if len(m.parsedLyrics) > 0 {
+			m.playbackPos = msg.position
+			// Find the current line based on playback position
+			currentIdx := -1
+			for i, line := range m.parsedLyrics {
+				if line.timestamp <= msg.position {
+					currentIdx = i
+				} else {
+					break
+				}
+			}
+			if currentIdx != -1 && currentIdx != m.currentLineIdx {
+				m.currentLineIdx = currentIdx
+				// Auto-scroll to keep current line visible
+				if m.autoScroll {
+					// Center the current line in the viewport
+					visibleLines := m.height - 15 // Account for header and borders
+					if visibleLines < 5 {
+						visibleLines = 5
+					}
+					targetScroll := m.currentLineIdx - (visibleLines / 3)
+					if targetScroll < 0 {
+						targetScroll = 0
+					}
+					m.scrollOffset = targetScroll
+				}
+			}
+			return m, tickPlaybackPosition()
+		}
+	}
+	return m, nil
+}
+
+func (m lyricsModel) View() string {
+	if !m.visible {
+		return ""
+	}
+
+	overlayWidth := int(float64(m.width) * 0.8)
+	overlayHeight := int(float64(m.height) * 0.8)
+	if overlayWidth < 40 {
+		overlayWidth = 40
+	}
+	if overlayHeight < 10 {
+		overlayHeight = 10
+	}
+
+	if overlayWidth > m.width {
+		overlayWidth = m.width
+	}
+	if overlayHeight > m.height {
+		overlayHeight = m.height
+	}
+
+	leftPadding := (m.width - overlayWidth) / 2
+	topPadding := (m.height - overlayHeight) / 2
+
+	var content strings.Builder
+
+	for row := 0; row < m.height; row++ {
+		if row > 0 {
+			content.WriteString("\n")
+		}
+
+		if row >= topPadding && row < topPadding+overlayHeight {
+			overlayRow := row - topPadding
+
+			for col := 0; col < leftPadding; col++ {
+				content.WriteString(" ")
+			}
+
+			if overlayRow == 0 {
+				content.WriteString("┌" + strings.Repeat("─", overlayWidth-2) + "┐")
+			} else if overlayRow == overlayHeight-1 {
+				content.WriteString("└" + strings.Repeat("─", overlayWidth-2) + "┘")
+			} else {
+				content.WriteString("│")
+
+				contentLine := m.getContentLine(overlayRow-1, overlayWidth-2)
+				// Strip ANSI codes for accurate width calculation
+				plainContent := stripANSI(contentLine)
+				contentWidth := runewidth.StringWidth(plainContent)
+				availableContentWidth := overlayWidth - 2
+
+				if contentWidth > availableContentWidth {
+					contentLine = runewidth.Truncate(contentLine, availableContentWidth, "")
+					contentWidth = runewidth.StringWidth(stripANSI(contentLine))
+				}
+
+				content.WriteString(contentLine)
+
+				padding := availableContentWidth - contentWidth
+				if padding > 0 {
+					content.WriteString(strings.Repeat(" ", padding))
+				}
+
+				content.WriteString("│")
+			}
+
+			rightPadding := m.width - leftPadding - overlayWidth
+			for col := 0; col < rightPadding; col++ {
+				content.WriteString(" ")
+			}
+		} else {
+			for col := 0; col < m.width; col++ {
+				content.WriteString(" ")
+			}
+		}
+	}
+
+	return content.String()
+}
+
+func (m lyricsModel) getContentLine(lineIndex int, maxWidth int) string {
+	if lineIndex == 0 {
+		title := " 🎵 LYRICS"
+		if len(title) > maxWidth {
+			title = title[:maxWidth]
+		}
+		return title
+	}
+
+	if lineIndex == 1 {
+		trackInfo := fmt.Sprintf(" %s - %s", m.trackName, m.artistName)
+		if len(trackInfo) > maxWidth {
+			trackInfo = runewidth.Truncate(trackInfo, maxWidth, "...")
+		}
+		return trackInfo
+	}
+
+	if lineIndex == 2 {
+		if m.source != "" {
+			sourceInfo := fmt.Sprintf(" Source: %s", m.source)
+			if len(sourceInfo) > maxWidth {
+				sourceInfo = runewidth.Truncate(sourceInfo, maxWidth, "...")
+			}
+			return sourceInfo
+		}
+		return ""
+	}
+
+	if lineIndex == 3 {
+		return strings.Repeat("─", maxWidth)
+	}
+
+	if m.loading {
+		if lineIndex == 4 {
+			return " Loading lyrics..."
+		}
+		return ""
+	}
+
+	if m.lastError != nil {
+		if lineIndex == 4 {
+			return " ❌ Lyrics not found"
+		}
+		if lineIndex == 5 {
+			errMsg := fmt.Sprintf(" %s", m.lastError.Error())
+			if len(errMsg) > maxWidth {
+				errMsg = runewidth.Truncate(errMsg, maxWidth, "...")
+			}
+			return errMsg
+		}
+		if lineIndex == 7 {
+			return " This song may not be in the lyrics database."
+		}
+		if lineIndex == 8 {
+			return " Try another song or add this provider in lyrics/lyrics.go"
+		}
+		if lineIndex == 10 {
+			return " Press 'q', 'esc', or 'l' to close"
+		}
+		return ""
+	}
+
+	if lineIndex == 4 {
+		controls := " ↑/↓: Scroll  |  q/esc/l: Close"
+		if len(m.parsedLyrics) > 0 {
+			controls = " 🎶 Synced Lyrics  |  q/esc/l: Close"
+		}
+		return controls
+	}
+
+	if lineIndex == 5 {
+		return ""
+	}
+
+	if lineIndex >= 6 {
+		// Use synced lyrics if available, otherwise use plain lyrics
+		if len(m.parsedLyrics) > 0 {
+			lyricsLineIndex := lineIndex - 6 + m.scrollOffset
+
+			if lyricsLineIndex >= 0 && lyricsLineIndex < len(m.parsedLyrics) {
+				lrcLine := m.parsedLyrics[lyricsLineIndex]
+				isCurrent := lyricsLineIndex == m.currentLineIdx
+				isPast := lyricsLineIndex < m.currentLineIdx
+
+				// Apple Music-style rendering with ANSI color codes
+				// Current line: bright white/green
+				// Future lines: dimmed gray
+				// Past lines: medium gray
+
+				var line string
+				if isCurrent {
+					// Current line: bright green/white with play indicator
+					// Using ANSI escape codes for brightness
+					line = fmt.Sprintf("\033[1;97m  ▶ %s\033[0m", lrcLine.text)
+				} else if isPast {
+					// Past line: dimmed gray
+					line = fmt.Sprintf("\033[38;5;240m    %s\033[0m", lrcLine.text)
+				} else {
+					// Future line: lighter gray
+					line = fmt.Sprintf("\033[38;5;246m    %s\033[0m", lrcLine.text)
+				}
+
+				// Note: runewidth.StringWidth doesn't account for ANSI codes
+				// so we need to calculate width without color codes
+				plainText := lrcLine.text
+				prefix := "    "
+				if isCurrent {
+					prefix = "  ▶ "
+				}
+				totalWidth := runewidth.StringWidth(prefix + plainText)
+				
+				if totalWidth > maxWidth {
+					truncated := runewidth.Truncate(plainText, maxWidth-len(prefix), "...")
+					if isCurrent {
+						line = fmt.Sprintf("\033[1;97m  ▶ %s\033[0m", truncated)
+					} else if isPast {
+						line = fmt.Sprintf("\033[38;5;240m    %s\033[0m", truncated)
+					} else {
+						line = fmt.Sprintf("\033[38;5;246m    %s\033[0m", truncated)
+					}
+				}
+				return line
+			}
+		} else {
+			// Fallback to plain lyrics
+			if m.lyrics == "" {
+				if lineIndex == 6 {
+					return " No lyrics available"
+				}
+				return ""
+			}
+
+			lyricsLines := strings.Split(m.lyrics, "\n")
+			lyricsLineIndex := lineIndex - 6 + m.scrollOffset
+
+			if lyricsLineIndex >= 0 && lyricsLineIndex < len(lyricsLines) {
+				line := "  " + lyricsLines[lyricsLineIndex]
+				if len(line) > maxWidth {
+					line = runewidth.Truncate(line, maxWidth, "...")
+				}
+				return line
+			}
+		}
+	}
+
+	return ""
+}
+
 // Context menu options
 type contextMenuOption int
 
@@ -1605,6 +2041,9 @@ type Model struct {
 	// Queue overlay
 	queueOverlay queueModel
 	queueVisible bool
+	// Lyrics overlay
+	lyricsOverlay lyricsModel
+	lyricsVisible bool
 	// Context menu
 	contextMenu    contextMenuModel
 	contextVisible bool
@@ -1793,6 +2232,8 @@ func NewModel() Model {
 		playlistsLoading:     true,
 		queueOverlay:         queueModel{visible: false, loading: false},
 		queueVisible:         false,
+		lyricsOverlay:        lyricsModel{visible: false, loading: false, autoScroll: true},
+		lyricsVisible:        false,
 	}
 }
 
@@ -1858,6 +2299,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update dimensions based on current terminal size
 		m.queueOverlay.width = m.lastWidth
 		m.queueOverlay.height = m.lastHeight
+	case lyricsMsg:
+		// Update the lyrics overlay with the new information
+		m.lyricsOverlay.lyrics = msg.lyrics
+		m.lyricsOverlay.syncedLyrics = msg.syncedLyrics
+		m.lyricsOverlay.trackName = msg.trackName
+		m.lyricsOverlay.artistName = msg.artist
+		m.lyricsOverlay.source = msg.source
+		m.lyricsOverlay.lastError = msg.err
+		m.lyricsOverlay.loading = false
+		m.lyricsOverlay.scrollOffset = 0
+		m.lyricsOverlay.autoScroll = true
+		// Update dimensions based on current terminal size
+		m.lyricsOverlay.width = m.lastWidth
+		m.lyricsOverlay.height = m.lastHeight
+		// Parse synced lyrics if available
+		if msg.syncedLyrics != "" {
+			m.lyricsOverlay.parsedLyrics = parseLRC(msg.syncedLyrics)
+			// Start playback position ticker for synced lyrics
+			return m, tickPlaybackPosition()
+		}
+	case playbackPosMsg:
+		// Forward to lyrics overlay when it's visible
+		if m.lyricsVisible {
+			updatedOverlay, overlayCmd := m.lyricsOverlay.Update(msg)
+			m.lyricsOverlay = updatedOverlay.(lyricsModel)
+			return m, overlayCmd
+		}
 	case searchResultsMsg:
 		// Handle search results
 		m.boxer.EditLeaf("main", func(model tea.Model) (tea.Model, error) {
@@ -2017,6 +2485,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle lyrics overlay navigation
+		if m.lyricsVisible {
+			switch msg.String() {
+			case "q", "esc", "l":
+				// Close lyrics overlay
+				m.lyricsVisible = false
+				m.lyricsOverlay.visible = false
+				return m, nil
+			case "up", "k":
+				// Scroll up in lyrics (disable auto-scroll when user manually scrolls)
+				m.lyricsOverlay.autoScroll = false
+				if m.lyricsOverlay.scrollOffset > 0 {
+					m.lyricsOverlay.scrollOffset--
+				}
+				return m, nil
+			case "down", "j":
+				// Scroll down in lyrics (disable auto-scroll when user manually scrolls)
+				m.lyricsOverlay.autoScroll = false
+				if len(m.lyricsOverlay.parsedLyrics) > 0 {
+					maxScroll := len(m.lyricsOverlay.parsedLyrics) - 5
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					if m.lyricsOverlay.scrollOffset < maxScroll {
+						m.lyricsOverlay.scrollOffset++
+					}
+				} else if m.lyricsOverlay.lyrics != "" {
+					lyricsLines := strings.Split(m.lyricsOverlay.lyrics, "\n")
+					maxScroll := len(lyricsLines) - 10
+					if maxScroll < 0 {
+						maxScroll = 0
+					}
+					if m.lyricsOverlay.scrollOffset < maxScroll {
+						m.lyricsOverlay.scrollOffset++
+					}
+				}
+				return m, nil
+			case "a":
+				// Toggle auto-scroll
+				m.lyricsOverlay.autoScroll = !m.lyricsOverlay.autoScroll
+				return m, nil
+			default:
+				// Ignore other keys when lyrics overlay is visible
+				return m, nil
+			}
+		}
+
 		// Handle Ctrl+W combinations
 		if m.ctrlWPressed {
 			m.ctrlWPressed = false
@@ -2120,6 +2635,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Start loading queue info
 				m.queueOverlay.loading = true
 				return m, fetchQueueInfo()
+			}
+			return m, nil
+
+		case "l":
+			// Toggle lyrics overlay with 'l'
+			if m.lyricsVisible {
+				m.lyricsVisible = false
+				m.lyricsOverlay.visible = false
+			} else {
+				// Get current track info
+				d := daemon.Daemon{}
+				currentTrack, err := d.GetCurrentTrack()
+				if err != nil {
+					// Can't get current track, show error
+					m.lyricsVisible = true
+					m.lyricsOverlay.visible = true
+					m.lyricsOverlay.width = m.lastWidth
+					m.lyricsOverlay.height = m.lastHeight
+					m.lyricsOverlay.lastError = fmt.Errorf("no track currently playing")
+					m.lyricsOverlay.loading = false
+					return m, nil
+				}
+
+				// Open lyrics overlay and start loading
+				m.lyricsVisible = true
+				m.lyricsOverlay.visible = true
+				m.lyricsOverlay.width = m.lastWidth
+				m.lyricsOverlay.height = m.lastHeight
+				m.lyricsOverlay.loading = true
+				m.lyricsOverlay.trackName = currentTrack.Name
+				m.lyricsOverlay.artistName = currentTrack.Artist
+				m.lyricsOverlay.lastError = nil
+				return m, fetchLyrics(currentTrack.Name, currentTrack.Artist)
 			}
 			return m, nil
 
@@ -2646,6 +3194,19 @@ func (m Model) View() string {
 		if queueOverlayView != "" {
 			// The queue overlay should completely cover the base view
 			return queueOverlayView
+		}
+	}
+
+	// If lyrics overlay is visible, render it on top
+	if m.lyricsVisible {
+		// Update the lyrics overlay dimensions to match current terminal size
+		m.lyricsOverlay.width = m.lastWidth
+		m.lyricsOverlay.height = m.lastHeight
+		// Render the lyrics overlay on top of the base view
+		lyricsOverlayView := m.lyricsOverlay.View()
+		if lyricsOverlayView != "" {
+			// The lyrics overlay should completely cover the base view
+			return lyricsOverlayView
 		}
 	}
 
